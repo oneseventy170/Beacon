@@ -1,6 +1,6 @@
 {
   "name": "devsigner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A simplified git/GitHub workflow for designers, with an AI-generated annotation layer.",
   "type": "module",
   "main": "src/main/main.js",
