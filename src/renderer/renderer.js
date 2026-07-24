@@ -34,6 +34,7 @@ const ICONS = {
   "archive": `<path d="M224,48H32A16,16,0,0,0,16,64V88a16,16,0,0,0,16,16v88a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V104a16,16,0,0,0,16-16V64A16,16,0,0,0,224,48ZM208,192H48V104H208ZM224,88H32V64H224V88ZM96,136a8,8,0,0,1,8-8h48a8,8,0,0,1,0,16H104A8,8,0,0,1,96,136Z"/>`,
   "folder": `<path d="M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0,39.38,216H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72ZM40,56H92.69l16,16H40ZM216,200H40V88H216Z"/>`,
   "check": `<path d="M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"/>`,
+  "trash": `<path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/>`,
   "caret-up-down": `<path d="M181.66,170.34a8,8,0,0,1,0,11.32l-48,48a8,8,0,0,1-11.32,0l-48-48a8,8,0,0,1,11.32-11.32L128,212.69l42.34-42.35A8,8,0,0,1,181.66,170.34Zm-96-84.68L128,43.31l42.34,42.35a8,8,0,0,0,11.32-11.32l-48-48a8,8,0,0,0-11.32,0l-48,48A8,8,0,0,0,85.66,85.66Z"/>`,
   "lighthouse": `<path d="M208,80a8,8,0,0,0-8,8v16H188.85L184,55.2A8,8,0,0,0,181.32,50L138.44,11.88l-.2-.17a16,16,0,0,0-20.48,0l-.2.17L74.68,50A8,8,0,0,0,72,55.2L67.15,104H56V88a8,8,0,0,0-16,0v24a8,8,0,0,0,8,8H65.54l-9.47,94.48A16,16,0,0,0,72,232H184a16,16,0,0,0,15.92-17.56L190.46,120H208a8,8,0,0,0,8-8V88A8,8,0,0,0,208,80ZM128,24l27,24H101ZM87.24,64h81.52l4,40H136V88a8,8,0,0,0-16,0v16H83.23ZM72,216l4-40H180l4,40Zm106.39-56H77.61l4-40h92.76Z"/>`,
   "fetch": `<path d="M248,128a87.34,87.34,0,0,1-17.6,52.81,8,8,0,1,1-12.8-9.62A71.34,71.34,0,0,0,232,128a72,72,0,0,0-144,0,8,8,0,0,1-16,0,88,88,0,0,1,3.29-23.88C74.2,104,73.1,104,72,104a48,48,0,0,0,0,96H96a8,8,0,0,1,0,16H72A64,64,0,1,1,81.29,88.68,88,88,0,0,1,248,128Zm-69.66,42.34L160,188.69V128a8,8,0,0,0-16,0v60.69l-18.34-18.35a8,8,0,0,0-11.32,11.32l32,32a8,8,0,0,0,11.32,0l32-32a8,8,0,0,0-11.32-11.32Z"/>`,
@@ -189,7 +190,7 @@ function closeMenu() {
   document.removeEventListener("mousedown", closeMenu._down, true);
   document.removeEventListener("keydown", closeMenu._key, true);
 }
-closeMenu._down = (e) => { const a = closeMenu._anchor; if (closeMenu._el && !closeMenu._el.contains(e.target) && a && !a.contains(e.target)) closeMenu(); };
+closeMenu._down = (e) => { const a = closeMenu._anchor; if (closeMenu._el && !closeMenu._el.contains(e.target) && (!a || !a.contains(e.target))) closeMenu(); };
 closeMenu._key = (e) => { if (e.key === "Escape") closeMenu(); };
 function openMenu(anchor, items) {
   if (closeMenu._anchor === anchor) { closeMenu(); return; } // toggle off
@@ -219,6 +220,84 @@ function openMenu(anchor, items) {
   closeMenu._el = menu; closeMenu._anchor = anchor;
   setTimeout(() => { document.addEventListener("mousedown", closeMenu._down, true); document.addEventListener("keydown", closeMenu._key, true); }, 0);
 }
+// Coordinate-anchored menu (for right-click). Reuses .menu styling + closeMenu
+// machinery; positioned at the cursor and kept inside the viewport.
+function openMenuAt(x, y, items) {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.className = "menu";
+  menu.innerHTML = items.map((it, i) =>
+    `<button class="menu-item ${it.danger ? "danger" : ""}" data-i="${i}">
+      <span class="menu-ico">${it.icon ? icon(it.icon) : ""}</span>
+      <span class="menu-label">${esc(it.label)}</span></button>`).join("");
+  document.body.appendChild(menu);
+  const mw = menu.offsetWidth || 200, mh = menu.offsetHeight || 40;
+  let left = x, top = y;
+  if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+  if (top + mh > window.innerHeight - 8) top = window.innerHeight - mh - 8;
+  menu.style.left = `${Math.round(Math.max(8, left))}px`;
+  menu.style.top = `${Math.round(Math.max(8, top))}px`;
+  menu.querySelectorAll(".menu-item").forEach((b) => b.addEventListener("click", () => {
+    const it = items[Number(b.dataset.i)]; closeMenu(); it.onClick && it.onClick();
+  }));
+  closeMenu._el = menu; closeMenu._anchor = null;
+  setTimeout(() => { document.addEventListener("mousedown", closeMenu._down, true); document.addEventListener("keydown", closeMenu._key, true); }, 0);
+}
+
+// Right-click a branch or stash row → delete it (with confirmation).
+function rowContextMenu(e) {
+  const li = e.target.closest && e.target.closest(".row-item");
+  if (!li) return;
+  const { type, id } = li.dataset;
+  let items = null;
+  if (type === "branch") {
+    const b = state.branches.find((x) => x.name === id);
+    if (!b || b.current || b.isDefault) return; // never the current or default branch
+    items = [{ label: "Delete branch", icon: "trash", danger: true, onClick: () => confirmDeleteBranch(id) }];
+  } else if (type === "stash") {
+    items = [{ label: "Delete stash", icon: "trash", danger: true, onClick: () => confirmDropStash(Number(id)) }];
+  }
+  if (!items) return;
+  e.preventDefault();
+  openMenuAt(e.clientX, e.clientY, items);
+}
+
+// A yes/no confirmation, reusing the modal overlay with its text input hidden.
+function confirmDialog({ title, ok = "Delete" }) {
+  return new Promise((resolve) => {
+    const overlay = $("modal"), input = $("modal-input"), okBtn = $("modal-ok");
+    $("modal-title").textContent = title; okBtn.textContent = ok;
+    input.classList.add("hidden"); okBtn.classList.add("danger-btn");
+    overlay.classList.remove("hidden"); okBtn.focus();
+    const finish = (v) => { overlay.classList.add("hidden"); input.classList.remove("hidden"); okBtn.classList.remove("danger-btn"); cleanup(); resolve(v); };
+    const onOk = () => finish(true), onCancel = () => finish(false);
+    const onKey = (e) => { if (e.key === "Enter") onOk(); else if (e.key === "Escape") onCancel(); };
+    const onOverlay = (e) => { if (e.target === overlay) onCancel(); };
+    function cleanup() { okBtn.removeEventListener("click", onOk); $("modal-cancel").removeEventListener("click", onCancel); document.removeEventListener("keydown", onKey); overlay.removeEventListener("mousedown", onOverlay); }
+    okBtn.addEventListener("click", onOk); $("modal-cancel").addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey); overlay.addEventListener("mousedown", onOverlay);
+  });
+}
+
+async function confirmDeleteBranch(name) {
+  const pretty = prettyBranch(name);
+  if (!(await confirmDialog({ title: `Delete branch “${pretty}”?` }))) return;
+  // Safe delete first; if git reports unmerged commits, confirm again to force.
+  let res = await window.graft.deleteBranch(state.cwd, name, false);
+  if (!res.ok && /unmerged/i.test(res.error || "")) {
+    if (!(await confirmDialog({ title: `“${pretty}” has commits not merged anywhere. Delete anyway?`, ok: "Delete anyway" }))) return;
+    res = await window.graft.deleteBranch(state.cwd, name, true);
+  }
+  if (!res.ok) { toast(res.error); return; }
+  toast(`Deleted “${pretty}”`);
+  await reloadRepoState(); goHome();
+}
+
+async function confirmDropStash(index) {
+  if (!(await confirmDialog({ title: "Delete this stash? This can’t be undone." }))) return;
+  try { await call(window.graft.dropStash, state.cwd, index); toast("Stash deleted"); await reloadRepoState(); goHome(); } catch {}
+}
+
 // The repo button opens the OS folder picker directly (no menu — there was only
 // ever one option).
 async function openRepo() { const dir = await call(window.graft.pickFolder); if (dir) await loadContext(dir); }
@@ -497,14 +576,15 @@ function renderBranchView(name, log, st) {
   const dirty = isDirty();
   const changed = st ? st.files.length : state.working.length;
   const restricted = state.working.filter((f) => f.sensitive).length;
+  const ozTotal = st ? st.files.filter((f) => f.sensitive).length : restricted;
   const diffStat = st && st.stat ? st.stat.replace(/^\s*\d+ files? changed,?\s*/, "") : "";
   const agents = agentButtonsHTML();
 
+  const zoneNote = ozTotal ? zoneCallout(
+    "Outside the editable zone",
+    `${ozTotal} change${ozTotal > 1 ? "s" : ""} on this branch ${ozTotal > 1 ? "touch" : "touches"} files outside the editable zone. You can still save and open a PR — Devsigner flags ${ozTotal > 1 ? "them" : "it"} for a developer — or use “Revert out-of-zone” to restore ${ozTotal > 1 ? "them" : "it"}.`) : "";
   const unsaved = dirty ? `
     <div class="detail-section-h">Unsaved changes (${state.working.length})</div>
-    ${restricted ? zoneCallout(
-      "Outside the editable zone",
-      `${restricted} of these ${restricted > 1 ? "files sit" : "file sits"} outside the editable zone, so ${restricted > 1 ? "they're" : "it's"} excluded from what you can commit. A developer should handle ${restricted > 1 ? "those" : "that"}.`) : ""}
     <ul class="files">${state.working.map(fileLi).join("")}</ul>` : "";
 
   const saves = commits.length
@@ -524,6 +604,7 @@ function renderBranchView(name, log, st) {
           ${diffStat ? `<span>·</span><span>${esc(diffStat)}</span>` : ""}
         </div>
         ${agents ? `<div class="agents-row">${agents}</div>` : ""}
+        ${zoneNote}
         ${unsaved}
         <div class="detail-section-h">Saves</div>
         ${saves}
@@ -534,9 +615,10 @@ function renderBranchView(name, log, st) {
           <button class="btn primary small" id="ab-save" ${dirty ? "" : "disabled"}>Save</button>
           <button class="btn small" id="ab-stash" ${dirty ? "" : "disabled"}>Stash</button>
           <button class="btn small" id="ab-restore" ${state.stashes.length ? "" : "disabled"}>Restore stash</button>
+          <button class="btn small danger-btn" id="ab-revert" ${ozTotal ? "" : "disabled"} title="Revert the changes outside the editable zone">Revert out-of-zone</button>
         </div>
         <div class="ab-right">
-          <button class="btn signal" id="ab-createpr" ${canPR ? "" : "disabled"}>${icon("pull-request")} Create PR</button>
+          <button class="btn primary" id="ab-createpr" ${canPR ? "" : "disabled"}>${icon("pull-request")} Create PR</button>
         </div>
       </div>
     </div>`, true);
@@ -546,11 +628,13 @@ function renderBranchView(name, log, st) {
   view.querySelector("#ab-save").addEventListener("click", async () => {
     const msg = view.querySelector("#ab-msg").value.trim();
     const btn = view.querySelector("#ab-save"); busy(btn, true, "Saving");
-    try { await call(window.graft.commit, state.cwd, msg); toast("Saved"); await reRender(); } catch { busy(btn, false); }
+    try { const r = await call(window.graft.commit, state.cwd, msg, true); toast(r.restricted ? `Saved · ${r.restricted} file${r.restricted > 1 ? "s" : ""} flagged for a developer` : "Saved"); await reRender(); } catch { busy(btn, false); }
   });
   view.querySelector("#ab-msg").addEventListener("keydown", (e) => { if (e.key === "Enter") view.querySelector("#ab-save").click(); });
   view.querySelector("#ab-stash").addEventListener("click", async () => { try { if (await doStash()) await reRender(); } catch {} });
   view.querySelector("#ab-restore").addEventListener("click", async () => { const b = view.querySelector("#ab-restore"); busy(b, true, ""); try { await call(window.graft.stashPop, state.cwd); toast("Stash restored"); await reRender(); } catch { busy(b, false); } });
+  const rz = view.querySelector("#ab-revert");
+  if (rz) rz.addEventListener("click", async () => { busy(rz, true, "Reverting"); try { const res = await call(window.graft.revertRestricted, state.cwd); toast(res.reverted ? `Reverted ${res.reverted} out-of-zone change${res.reverted > 1 ? "s" : ""}${res.committed ? " · new commit" : ""}` : "No out-of-zone changes to revert"); await reRender(); } catch { busy(rz, false); } });
   view.querySelector("#ab-createpr").addEventListener("click", () => createPR());
 }
 
@@ -558,6 +642,8 @@ function renderBranchView(name, log, st) {
 // open it for real on confirm.
 async function createPR() {
   const modal = $("ship-modal"), preview = $("ship-preview"), confirm = $("ship-confirm"), cancel = $("ship-cancel");
+  const mt = modal.querySelector(".modal-title");
+  if (mt) mt.textContent = state.ctx && state.ctx.branch ? `Create pull request · ${state.ctx.branch}` : "Create pull request";
   modal.classList.remove("hidden");
   confirm.classList.remove("hidden");
 
@@ -565,7 +651,7 @@ async function createPR() {
   let onConfirm;
   const onCancel = () => close();
   const onOverlay = (e) => { if (e.target === modal) close(); };
-  function cleanup() { cancel.removeEventListener("click", onCancel); confirm.removeEventListener("click", onConfirm); modal.removeEventListener("mousedown", onOverlay); }
+  function cleanup() { confirm.className = "btn primary"; cancel.removeEventListener("click", onCancel); confirm.removeEventListener("click", onConfirm); modal.removeEventListener("mousedown", onOverlay); }
 
   if (!(state.gh && state.gh.authed)) {
     // Not connected — turn the modal into a connect prompt.
@@ -575,25 +661,39 @@ async function createPR() {
     confirm.disabled = false;
     onConfirm = () => { close(); connectGh(); };
   } else {
-    preview.innerHTML = `<div class="muted"><span class="spinner"></span> Analyzing your changes…</div>`;
-    confirm.textContent = "Create pull request";
-    confirm.disabled = true;
     let annotation = null;
-    try {
-      const r = await call(window.graft.ship, { cwd: state.cwd, dryRun: true });
-      annotation = r.annotation;
-      const blocked = !!(r.restricted && r.restricted.length);
-      const n = r.restricted ? r.restricted.length : 0;
-      const warn = blocked ? zoneCallout(
-        "Can't open this PR yet",
-        `${n} file${n > 1 ? "s" : ""} ${n > 1 ? "are" : "is"} outside the editable zone and ${n > 1 ? "need" : "needs"} a developer: ${r.restricted.map((f) => `<code>${esc(f)}</code>`).join(" ")}`) : "";
-      preview.innerHTML = `${warn}<div class="preview-head"><span class="badge dim">${esc(r.annotation.source)}</span><span class="preview-title">${esc(r.annotation.title)}</span></div><div class="preview-body">${renderMarkdown(r.annotation.body)}</div>`;
-      confirm.disabled = blocked;
-    } catch { preview.innerHTML = `<div class="muted">Couldn't analyze the changes on this branch.</div>`; }
+    let blocked = false;
+    const renderPreview = async () => {
+      preview.innerHTML = `<div class="muted"><span class="spinner"></span> Analyzing your changes…</div>`;
+      confirm.className = "btn primary";
+      confirm.textContent = "Create pull request";
+      confirm.disabled = true;
+      try {
+        const r = await call(window.graft.ship, { cwd: state.cwd, dryRun: true });
+        annotation = r.annotation;
+        blocked = !!(r.restricted && r.restricted.length);
+        const n = r.restricted ? r.restricted.length : 0;
+        const warn = blocked ? zoneCallout(
+          "Some changes are outside the editable zone",
+          `${n} file${n > 1 ? "s" : ""} ${n > 1 ? "are" : "is"} outside the editable zone — a developer usually owns ${n > 1 ? "these" : "this"}: ${r.restricted.map((f) => `<code>${esc(f)}</code>`).join(" ")}.`)
+          + `<div class="callout-row"><button class="btn small danger-btn" id="revert-oz">Revert those changes</button></div>` : "";
+        preview.innerHTML = `${warn}<div class="preview-head"><span class="badge dim">${esc(r.annotation.source)}</span></div><div class="preview-body">${renderMarkdown(r.annotation.body)}</div>`;
+        confirm.className = "btn primary";
+        confirm.textContent = blocked ? "Create PR & flag" : "Create pull request";
+        confirm.disabled = false;
+        const rz = preview.querySelector("#revert-oz");
+        if (rz) rz.addEventListener("click", async () => {
+          busy(rz, true, "Reverting");
+          try { const res = await call(window.graft.revertRestricted, state.cwd); toast(res.reverted ? `Reverted ${res.reverted} out-of-zone change${res.reverted > 1 ? "s" : ""}` : "Nothing to revert"); await reloadRepoState(); await renderPreview(); }
+          catch { busy(rz, false); }
+        });
+      } catch { preview.innerHTML = `<div class="muted">Couldn't analyze the changes on this branch.</div>`; }
+    };
+    await renderPreview();
     onConfirm = async () => {
       busy(confirm, true, "Creating");
       try {
-        const r = await call(window.graft.ship, { cwd: state.cwd, dryRun: false, title: annotation && annotation.title });
+        const r = await call(window.graft.ship, { cwd: state.cwd, dryRun: false, title: annotation && annotation.title, allowRestricted: blocked });
         toast(`Pull request created: ${r.prUrl}`);
         close();
         await reloadRepoState();
@@ -682,6 +782,7 @@ async function refreshView() {
   if (s && s.type === "branch") selectBranch(s.branch);
 }
 $("list-refresh").addEventListener("click", () => { if (state.cwd) refreshView(); });
+$("rows").addEventListener("contextmenu", rowContextMenu);
 // Activity search: toggle a filter input in the list header.
 function toggleSearch(force) {
   state.searchOpen = force !== undefined ? force : !state.searchOpen;

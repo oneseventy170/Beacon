@@ -2,7 +2,7 @@
 // Owns the engine and the OS-level capabilities (file dialog, shell). The
 // renderer never touches Node directly; it calls these handlers over IPC.
 
-import { app, BrowserWindow, ipcMain, dialog, shell } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { spawnSync, spawn } from "node:child_process";
@@ -10,6 +10,10 @@ import { existsSync } from "node:fs";
 import * as graft from "../engine/graft-core.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Name the app so the macOS menu bar reads "Devsigner" (not "Electron") in dev too.
+// Must run before app is ready / any menu is built.
+app.setName("Devsigner");
 
 // A Finder-launched app inherits a minimal PATH (no Homebrew), so tools like
 // `gh` (and a Homebrew `git`) wouldn't resolve. Add the usual install dirs so
@@ -118,12 +122,13 @@ app.whenReady().then(() => {
   handle("graft:plan", ({ cwd }) =>
     graft.plan({ cwd, anthropicKey: process.env.ANTHROPIC_API_KEY, model: process.env.DEVSIGNER_MODEL }));
 
-  handle("graft:ship", ({ cwd, dryRun, title, account }) => {
+  handle("graft:ship", ({ cwd, dryRun, title, account, allowRestricted }) => {
     const { token } = resolveAccount(account);
     return graft.ship({
       cwd,
       dryRun,
       title,
+      allowRestricted,
       githubToken: token,
       anthropicKey: process.env.ANTHROPIC_API_KEY,
       model: process.env.DEVSIGNER_MODEL,
@@ -140,7 +145,7 @@ app.whenReady().then(() => {
   handle("graft:ghAuthLogin", () => ghAuthLogin());
   handle("graft:ghAuthSwitch", () => ghAuthSwitch());
   handle("graft:openIn", (arg) => openIn(arg));
-  handle("graft:commit", ({ cwd, message }) => graft.commit({ cwd, message }));
+  handle("graft:commit", ({ cwd, message, allowRestricted }) => graft.commit({ cwd, message, allowRestricted }));
   handle("graft:stash", ({ cwd, message }) => graft.stash({ cwd, message }));
   handle("graft:stashList", (cwd) => graft.stashList({ cwd }));
   handle("graft:stashPop", (cwd) => graft.stashPop({ cwd }));
@@ -148,8 +153,11 @@ app.whenReady().then(() => {
   handle("graft:stashRename", ({ cwd, index, message }) => graft.stashRename({ cwd, index, message }));
   handle("graft:workingChanges", (cwd) => graft.workingChanges({ cwd }));
   handle("graft:discard", (cwd) => graft.discard({ cwd }));
+  handle("graft:revertRestricted", (cwd) => graft.revertRestricted({ cwd }));
   handle("graft:listBranches", (cwd) => graft.listBranches({ cwd }));
   handle("graft:checkout", ({ cwd, branch }) => graft.checkout({ cwd, branch }));
+  handle("graft:deleteBranch", ({ cwd, branch, force }) => graft.deleteBranch({ cwd, branch, force }));
+  handle("graft:dropStash", ({ cwd, index }) => graft.dropStash({ cwd, index }));
   handle("graft:branchLog", (cwd) => graft.branchLog({ cwd }));
   handle("graft:fetchRemote", (cwd) => graft.fetchRemote({ cwd }));
   handle("graft:pull", (cwd) => graft.pull({ cwd }));
@@ -163,6 +171,18 @@ app.whenReady().then(() => {
     const { token } = resolveAccount(account);
     return graft.pullRequestDetail({ cwd, number, token });
   });
+
+  // Standard macOS menu; the app menu (bold first item) uses app.name → "Devsigner".
+  if (process.platform === "darwin") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: "appMenu" },
+        { role: "editMenu" },
+        { role: "viewMenu" },
+        { role: "windowMenu" },
+      ]),
+    );
+  }
 
   createWindow();
   app.on("activate", () => {

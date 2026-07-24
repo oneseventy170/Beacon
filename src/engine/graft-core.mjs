@@ -3,7 +3,7 @@
 // operate on) and RETURNS structured data or throws an Error. Both the CLI and
 // the Electron app consume this module.
 
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, chmodSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,6 +145,23 @@ export function checkout({ cwd, branch } = {}) {
   return { branch };
 }
 
+// Delete a local branch. Refuses the current or default branch. Without force,
+// git refuses branches with unmerged commits — the UI re-calls with force after
+// a second confirmation. Never touches the remote.
+export function deleteBranch({ cwd, branch, force = false } = {}) {
+  if (!isRepo(cwd)) throw new Error("not a git repository");
+  if (!branch) throw new Error("no branch given");
+  if (branch === currentBranch(cwd)) throw new Error("can't delete the branch you're on — switch away first");
+  if (branch === defaultBranch(cwd)) throw new Error("can't delete the default branch");
+  const r = gitFor(cwd)("branch", force ? "-D" : "-d", branch);
+  if (r.code !== 0) {
+    const msg = r.stderr || r.stdout || "could not delete branch";
+    if (/not fully merged/i.test(msg)) throw new Error("unmerged");
+    throw new Error(msg);
+  }
+  return { deleted: branch, forced: force };
+}
+
 // Fetch remote refs (no working-tree changes). Safe to call anytime.
 export function fetchRemote({ cwd } = {}) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
@@ -229,6 +246,11 @@ export const DEFAULT_EDITABLE = [
   "**/assets/**", "**/public/**", "**/static/**", "**/images/**", "**/img/**", "**/fonts/**", "**/icons/**",
   "apps/web-client/**", "apps/web-customer-client/**",
   "packages/design-tokens/**",
+  // Front-end build & styling config (Tailwind, PostCSS, Vite, tsconfig), at the
+  // repo root or nested. Backend configs stay restricted — their directory
+  // (apps/web-server, …) wins on the denylist below.
+  "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "tsconfig*.json",
+  "**/*.config.js", "**/*.config.cjs", "**/*.config.mjs", "**/*.config.ts", "**/tsconfig*.json",
 ];
 
 // Never editable, even if matched above. Denylist wins.
@@ -242,7 +264,6 @@ export const DEFAULT_RESTRICTED = [
   "**/db/**", "**/database/**", "**/prisma/**", "**/*schema*",
   "**/.env*", "**/*.env*", "**/fnox.toml",
   ".github/**", "**/.github/**",
-  "**/*.config.js", "**/*.config.ts", "**/*.config.mjs", "**/*.config.cjs", "**/vite.config.*", "**/tsconfig*.json",
   "package.json", "**/package.json", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock",
 ];
 
@@ -655,7 +676,7 @@ async function createPrViaRest({ cwd, title, body, base, head, token }) {
 
 // dryRun: returns {branch, defaultBranch, files, annotation} with zero side effects.
 // real:   stages, commits, pushes, opens PR. githubToken scopes the gh/REST call.
-export async function ship({ cwd, dryRun = false, title, anthropicKey, model, githubToken } = {}) {
+export async function ship({ cwd, dryRun = false, title, anthropicKey, model, githubToken, allowRestricted = false } = {}) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
   const branch = currentBranch(cwd);
   const def = defaultBranch(cwd);
@@ -674,13 +695,16 @@ export async function ship({ cwd, dryRun = false, title, anthropicKey, model, gi
 
   // Enforce the editable zone before doing anything (the pre-commit hook is the
   // other line of defense; this gives a clean error even if the hook was bypassed).
-  if (restricted.length) {
+  // allowRestricted is the explicit "create PR anyway" override from the UI. The
+  // out-of-zone files are still flagged for the reviewer in the PR body.
+  if (restricted.length && !allowRestricted) {
     throw new Error(
       `blocked: ${restricted.length} file(s) are outside the editable zone (front end). A developer should make these changes:\n${restricted.map((f) => `  ${f}`).join("\n")}`
     );
   }
 
-  // Stage + commit.
+  // Stage + commit. When overriding the zone, also skip the pre-commit guard hook
+  // (it would otherwise reject the out-of-zone files).
   gitMust(cwd, "add", "-A");
   let committed = false;
   if (gitFor(cwd)("diff", "--cached", "--quiet").code !== 0) {
@@ -688,7 +712,9 @@ export async function ship({ cwd, dryRun = false, title, anthropicKey, model, gi
     const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
     const msgFile = join(dir, "msg.txt");
     writeFileSync(msgFile, msg, "utf8");
-    gitMust(cwd, "commit", "-F", msgFile);
+    const commitArgs = ["commit", "-F", msgFile];
+    if (restricted.length && allowRestricted) commitArgs.push("--no-verify");
+    gitMust(cwd, ...commitArgs);
     committed = true;
   }
 
@@ -708,22 +734,26 @@ export async function ship({ cwd, dryRun = false, title, anthropicKey, model, gi
 // Save-your-work: commit + stash (exposed to the UI with plain-language help)
 // ---------------------------------------------------------------------------
 
-// Stage everything and commit. Respects the editable zone (throws before the
-// pre-commit hook would, so the UI gets a clean message).
-export function commit({ cwd, message }) {
+// Stage everything and commit. Out-of-zone files are allowed but flagged: the UI
+// passes allowRestricted so a designer can save freely (and the change shows in the
+// save list); the out-of-zone files are surfaced in the branch view and PR instead
+// of blocking. allowRestricted also skips the pre-commit guard hook.
+export function commit({ cwd, message, allowRestricted = false }) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
   const s = status({ cwd, fetch: false });
   if (!s.files.length) throw new Error("nothing to commit — no changes yet");
   const restricted = s.files.filter((f) => f.sensitive).map((f) => f.file);
-  if (restricted.length) {
+  if (restricted.length && !allowRestricted) {
     throw new Error(`can't commit — ${restricted.length} file(s) outside the editable zone:\n${restricted.map((f) => `  ${f}`).join("\n")}`);
   }
   gitMust(cwd, "add", "-A");
   const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
   const msgFile = join(dir, "msg.txt");
   writeFileSync(msgFile, (message && message.trim()) || "Update", "utf8");
-  gitMust(cwd, "commit", "-F", msgFile);
-  return { committed: true, message: (message && message.trim()) || "Update", files: s.files.length };
+  const args = ["commit", "-F", msgFile];
+  if (restricted.length && allowRestricted) args.push("--no-verify");
+  gitMust(cwd, ...args);
+  return { committed: true, message: (message && message.trim()) || "Update", files: s.files.length, restricted: restricted.length };
 }
 
 // Set current changes aside (including untracked) without committing.
@@ -777,6 +807,51 @@ export function discard({ cwd } = {}) {
   return { discarded: true };
 }
 
+// Revert ALL changes outside the editable zone on this branch — uncommitted AND
+// already-committed — back to the base (default branch), leaving in-zone work
+// untouched. Anything that was committed is undone with one new commit (no history
+// rewrite, so it's safe on a pushed branch / open PR). The escape hatch to get a
+// branch back to only touching the editable area.
+export function revertRestricted({ cwd } = {}) {
+  if (!isRepo(cwd)) throw new Error("not a git repository");
+  const root = gitMust(cwd, "rev-parse", "--show-toplevel");
+  const cfg = loadConfig(cwd);
+  const base = baseRef(cwd, defaultBranch(cwd));
+  const g = gitFor(cwd);
+
+  // Every path that differs from base: committed, staged, unstaged, or untracked.
+  const paths = new Set();
+  for (const range of [`${base}...HEAD`, "HEAD", "--cached"]) {
+    for (const p of (g("diff", "--name-only", range).stdout || "").split("\n").filter(Boolean)) paths.add(p);
+  }
+  for (const p of untrackedFiles(cwd)) paths.add(p);
+  const restricted = [...paths].filter((f) => isRestricted(f, cfg));
+  if (!restricted.length) return { reverted: 0, committed: false, files: [] };
+
+  for (const f of restricted) {
+    if (g("cat-file", "-e", `${base}:${f}`).code === 0) {
+      g("checkout", base, "--", f); // restore the base version (stages it)
+    } else if (g("cat-file", "-e", `HEAD:${f}`).code === 0) {
+      g("rm", "-f", "--", f); // added & committed on the branch → stage a deletion
+    } else {
+      try { rmSync(join(root, f), { force: true }); } catch { /* already gone */ }
+      g("reset", "-q", "--", f); // untracked new file → just remove it, unstaged
+    }
+  }
+
+  // If undoing committed changes staged anything, land it as one commit. --no-verify
+  // because the staged paths are (by definition) outside the zone the hook guards.
+  let committed = false;
+  if (g("diff", "--cached", "--quiet").code !== 0) {
+    const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
+    const msgFile = join(dir, "msg.txt");
+    writeFileSync(msgFile, "Revert changes outside the editable zone", "utf8");
+    gitMust(cwd, "commit", "--no-verify", "-F", msgFile);
+    committed = true;
+  }
+  return { reverted: restricted.length, committed, files: restricted };
+}
+
 // Rename a stash entry. Git can't rename in place, so we re-store the same
 // commit under the new message, then drop the original (content stays referenced
 // the whole time). Renaming moves the entry to the top of the stash list.
@@ -789,6 +864,14 @@ export function stashRename({ cwd, index = 0, message } = {}) {
   gitMust(cwd, "stash", "drop", `stash@{${index}}`);
   gitMust(cwd, "stash", "store", "-m", message.trim(), sha);
   return { renamed: true, message: message.trim() };
+}
+
+// Discard a stash entry without restoring it. Destructive — the entry is gone.
+export function dropStash({ cwd, index = 0 } = {}) {
+  if (!isRepo(cwd)) throw new Error("not a git repository");
+  const r = gitFor(cwd)("stash", "drop", `stash@{${index}}`);
+  if (r.code !== 0) throw new Error(r.stderr || r.stdout || "could not delete stash");
+  return { dropped: index };
 }
 
 // Files inside a specific stash entry.
