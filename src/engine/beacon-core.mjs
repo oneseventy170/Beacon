@@ -1,12 +1,13 @@
-// Devsigner engine — pure logic, no console output, no process.exit.
+// Beacon engine — pure logic, no console output, no process.exit.
 // Every function takes an options object (always including `cwd`, the repo to
 // operate on) and RETURNS structured data or throws an Error. Both the CLI and
 // the Electron app consume this module.
 
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, chmodSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Process helpers (cwd-aware)
@@ -222,18 +223,35 @@ export function branchLog({ cwd } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Editable-zone config
+// Branch scope (.beacon/scope.json)
 //
-// The zone is an ALLOWLIST: a designer may edit files matching `editablePaths`
-// (the front end — styles, components, pages, assets, tokens, …) and may create
-// new files there. `restrictedPaths` is a denylist that ALWAYS WINS, so backend/
-// auth/routing/DB/config stay protected even when they'd otherwise match the
-// allowlist (e.g. a `routes/` folder full of .tsx). A file is editable iff it
-// matches the allowlist AND not the denylist; everything else is restricted.
+// The scope is an ALLOWLIST: on a Beacon-started branch, the agent (or anyone)
+// may edit files matching `allow` (the front end — styles, components, pages,
+// assets, tokens, …) and may create new files there. `deny` ALWAYS WINS, so
+// backend/auth/routing/DB/config stay protected even when they'd otherwise
+// match the allowlist (e.g. a `routes/` folder full of .tsx). A file is in
+// scope iff it matches `allow` AND not `deny`; everything else is out of scope.
+//
+// The scope is written per branch, committed as the branch's FIRST commit
+// (together with a plain-language CLAUDE.md section) so the declaration is
+// visible in the PR diff before any change is.
+//
+// PROTOTYPE ZONE: when the task needs backend behaviour to work, the agent is
+// told (CLAUDE.md) not to build it — instead it mocks the data/service layer
+// under the `prototype` paths and renders the real components against fixtures
+// there. Prototype files are always in scope, tracked as their own category,
+// and the backend work needed (`.beacon/prototype/README.md`) rides into the
+// PR description for the developer who productionizes it.
 // ---------------------------------------------------------------------------
 
-// The front end: what a designer can freely edit and add to.
-export const DEFAULT_EDITABLE = [
+export const SCOPE_FILE = ".beacon/scope.json";
+export const PROTO_NOTES = ".beacon/prototype/README.md";
+
+// Where a working prototype may mock what the backend would provide.
+export const DEFAULT_PROTOTYPE = [".beacon/prototype/**"];
+
+// The front end: what a Beacon-scoped branch can freely edit and add to.
+export const DEFAULT_ALLOW = [
   "**/*.css", "**/*.scss", "**/*.sass", "**/*.less", "**/*.pcss", "**/*.styl",
   "**/*.svg", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.webp", "**/*.avif", "**/*.ico",
   "**/*.woff", "**/*.woff2", "**/*.ttf", "**/*.otf",
@@ -247,14 +265,14 @@ export const DEFAULT_EDITABLE = [
   "apps/web-client/**", "apps/web-customer-client/**",
   "packages/design-tokens/**",
   // Front-end build & styling config (Tailwind, PostCSS, Vite, tsconfig), at the
-  // repo root or nested. Backend configs stay restricted — their directory
+  // repo root or nested. Backend configs stay denied — their directory
   // (apps/web-server, …) wins on the denylist below.
   "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "tsconfig*.json",
   "**/*.config.js", "**/*.config.cjs", "**/*.config.mjs", "**/*.config.ts", "**/tsconfig*.json",
 ];
 
-// Never editable, even if matched above. Denylist wins.
-export const DEFAULT_RESTRICTED = [
+// Never in scope, even if matched above. Denylist wins.
+export const DEFAULT_DENY = [
   "**/auth/**", "**/*auth*",
   "**/middleware*", "**/*middleware*",
   "**/routes/**", "**/routing/**", "**/*router*", "**/*routes-registry*", "**/route.*", "**/*.route.*",
@@ -267,22 +285,26 @@ export const DEFAULT_RESTRICTED = [
   "package.json", "**/package.json", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock",
 ];
 
-function loadConfig(cwd) {
-  const root = gitMust(cwd, "rev-parse", "--show-toplevel");
-  const path = join(root, ".devsignerrc.json");
-  let editable = DEFAULT_EDITABLE;
-  let restricted = DEFAULT_RESTRICTED;
+function repoRoot(cwd) {
+  return gitMust(cwd, "rev-parse", "--show-toplevel");
+}
+
+function loadScope(cwd) {
+  const path = join(repoRoot(cwd), SCOPE_FILE);
+  let allow = DEFAULT_ALLOW;
+  let deny = DEFAULT_DENY;
+  let prototype = DEFAULT_PROTOTYPE;
   if (existsSync(path)) {
     try {
       const cfg = JSON.parse(readFileSync(path, "utf8"));
-      if (Array.isArray(cfg.editablePaths)) editable = cfg.editablePaths;
-      if (Array.isArray(cfg.restrictedPaths)) restricted = cfg.restrictedPaths;
-      else if (Array.isArray(cfg.sensitivePaths)) restricted = cfg.sensitivePaths; // legacy alias
+      if (Array.isArray(cfg.allow)) allow = cfg.allow;
+      if (Array.isArray(cfg.deny)) deny = cfg.deny;
+      if (Array.isArray(cfg.prototype)) prototype = cfg.prototype;
     } catch {
-      /* malformed config — fall back to defaults */
+      /* malformed scope — fall back to defaults */
     }
   }
-  return { editablePaths: editable, restrictedPaths: restricted };
+  return { allow, deny, prototype };
 }
 
 function globToRegex(glob) {
@@ -296,11 +318,15 @@ function globToRegex(glob) {
 
 const matchesAny = (file, globs) => globs.some((g) => globToRegex(g).test(file));
 
-// Restricted = outside the editable zone. Devsigner's own config is always allowed.
-function isRestricted(file, cfg) {
-  if (file === ".devsignerrc.json") return false;
-  return !(matchesAny(file, cfg.editablePaths) && !matchesAny(file, cfg.restrictedPaths));
+// Classify a file: "prototype" (the mock zone — always in scope, tracked as
+// its own category), "beacon" (Beacon's own declaration files), "in" (matches
+// allow and not deny), or "out" (everything else — flagged).
+function fileZone(file, cfg) {
+  if (matchesAny(file, cfg.prototype)) return "prototype";
+  if (file === "CLAUDE.md" || file === ".beacon" || file.startsWith(".beacon/")) return "beacon";
+  return matchesAny(file, cfg.allow) && !matchesAny(file, cfg.deny) ? "in" : "out";
 }
+const isOutOfScope = (file, cfg) => fileZone(file, cfg) === "out";
 
 // ---------------------------------------------------------------------------
 // Diff analysis
@@ -319,9 +345,10 @@ function untrackedFiles(cwd) {
 }
 
 function untrackedAsDiff(cwd) {
-  const root = gitMust(cwd, "rev-parse", "--show-toplevel");
+  const root = repoRoot(cwd);
   let out = "";
   for (const f of untrackedFiles(cwd)) {
+    if (f === "CLAUDE.md" || f === SCOPE_FILE) continue;
     try {
       const content = readFileSync(join(root, f), "utf8");
       if (content.includes("\0")) continue;
@@ -350,17 +377,25 @@ function changedFiles(cwd, base, cfg) {
   ingest(git("diff", "--name-status", "HEAD").stdout || "");
   for (const f of untrackedFiles(cwd)) if (!merged.has(f)) merged.set(f, "A");
 
-  return [...merged.entries()].map(([file, code]) => ({
-    file,
-    status: STATUS_WORDS[code] || "changed",
-    sensitive: isRestricted(file, cfg), // "sensitive" == outside the editable zone
-  }));
+  return [...merged.entries()].map(([file, code]) => {
+    const zone = fileZone(file, cfg);
+    return {
+      file,
+      status: STATUS_WORDS[code] || "changed",
+      outOfScope: zone === "out",
+      prototype: zone === "prototype",
+    };
+  });
 }
 
+// Beacon's declaration files are excluded — their glob patterns would pollute
+// the reused-token/component signal on every branch. Prototype code stays in:
+// it's real UI work and its reuse signal matters.
 function fullDiff(cwd, base) {
   const git = gitFor(cwd);
-  const committed = git("diff", `${base}...HEAD`).stdout || "";
-  const uncommitted = git("diff", "HEAD").stdout || "";
+  const excl = ["--", ".", `:(exclude)${SCOPE_FILE}`, ":(exclude)CLAUDE.md"];
+  const committed = git("diff", `${base}...HEAD`, ...excl).stdout || "";
+  const uncommitted = git("diff", "HEAD", ...excl).stdout || "";
   return [committed, uncommitted, untrackedAsDiff(cwd)].filter(Boolean).join("\n");
 }
 
@@ -400,7 +435,7 @@ export function status({ cwd, fetch: doFetch = true } = {}) {
   if (!branch) throw new Error("detached HEAD — checkout a branch first");
   const def = defaultBranch(cwd);
   if (doFetch) run("git", ["fetch", "origin", def], { cwd });
-  const cfg = loadConfig(cwd);
+  const cfg = loadScope(cwd);
   const base = baseRef(cwd, def);
   const files = changedFiles(cwd, base, cfg);
   const signal = analyzeAddedLines(fullDiff(cwd, base));
@@ -416,99 +451,172 @@ export function slugify(name) {
   return String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
 }
 
-// --- editable-zone setup (runs on `start`) ---------------------------------
+// --- scope declaration (written + committed on `start`) ---------------------
 
-const GUARD_MARK = "devsigner-editable-zone-guard";
-
-// Write a .devsignerrc.json designating the editable zone, if one doesn't exist.
-export function ensureZoneConfig(cwd) {
-  const root = gitMust(cwd, "rev-parse", "--show-toplevel");
-  const path = join(root, ".devsignerrc.json");
-  if (existsSync(path)) return { created: false, path };
-  const cfg = {
+// (Re)write .beacon/scope.json for this branch. Always rewritten on start so a
+// scope.json inherited from a merged branch never leaks onto a new one.
+export function writeScope({ cwd, branch, task } = {}) {
+  const root = repoRoot(cwd);
+  mkdirSync(join(root, ".beacon"), { recursive: true });
+  const scope = {
     _comment:
-      "Devsigner editable zone. A designer may freely edit and create files matching editablePaths (the front end). restrictedPaths always wins (backend, auth, routing, DB, config). Commits touching restricted files are blocked by Devsigner's pre-commit hook. Tune these globs for your repo.",
-    editablePaths: DEFAULT_EDITABLE,
-    restrictedPaths: DEFAULT_RESTRICTED,
+      "Beacon branch scope — the enforced rule for this branch/task. Edits may touch files matching `allow` (the front end); `deny` always wins (backend, auth, routing, DB schema, API handlers, infra config). Beacon's Claude Code PreToolUse hook checks every file write against this: out-of-scope writes are flagged (never blocked) and revertable via `beacon review` before the PR goes out. `prototype` paths are the mock zone: when the UI needs backend behaviour, it gets prototyped there against fixtures instead of touching the real backend. Tune the globs per repo.",
+    branch,
+    task: task || branch,
+    createdAt: new Date().toISOString(),
+    allow: DEFAULT_ALLOW,
+    deny: DEFAULT_DENY,
+    prototype: DEFAULT_PROTOTYPE,
   };
-  writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`);
-  return { created: true, path };
+  writeFileSync(join(root, SCOPE_FILE), `${JSON.stringify(scope, null, 2)}\n`);
+  return { path: join(root, SCOPE_FILE) };
 }
 
-function hooksDir(cwd) {
-  const r = run("git", ["rev-parse", "--path-format=absolute", "--git-path", "hooks"], { cwd });
-  if (r.code === 0 && r.stdout) return r.stdout;
-  return join(gitMust(cwd, "rev-parse", "--git-dir"), "hooks"); // fallback
+// --- CLAUDE.md guidance (plain language, marker-delimited) -------------------
+
+const CLAUDE_START = "<!-- beacon:scope -->";
+const CLAUDE_END = "<!-- /beacon:scope -->";
+
+function claudeSection(branch) {
+  return `${CLAUDE_START}
+## Branch scope (Beacon)
+
+This branch (\`${branch}\`) is scoped to **front-end / presentation files only** —
+components, styles, view templates, static assets, and front-end test files.
+See \`.beacon/scope.json\` for the enforced rule (allowed and denied path patterns).
+
+**Never modify backend, auth, routing, database-schema, API, or infra-config
+files** — a developer owns those. Beacon watches every file write: anything
+outside the scope is flagged (not blocked) and reviewed — and revertable —
+before a PR is opened.
+
+### Needs backend to work? Prototype in front of it
+
+If the change depends on backend behaviour that doesn't exist yet, don't build
+the backend — build a **working prototype in front of it**:
+
+- Put everything mock under \`.beacon/prototype/\`: fixture data plus a stubbed
+  service/API layer exposing the same interface the real backend would.
+- Build the real UI with the repo's **actual components, styles, and design
+  tokens** — only the data behind it is fake.
+- Render it separately: a sandbox entry (story, standalone page, or harness)
+  inside \`.beacon/prototype/\`. Never wire mocks into production entry points
+  and never register real routes.
+- List the backend work needed to make it real in
+  \`.beacon/prototype/README.md\` — Beacon includes it in the PR so the
+  reviewing developer knows exactly what to productionize.
+${CLAUDE_END}`;
 }
 
-// The zone checker — a self-contained ESM script dropped in .git/hooks. It reads
-// .devsignerrc.json (or the baked-in defaults) and blocks commits that stage files
-// outside the editable zone. Kept dependency-free so it works wherever git runs.
-function zoneCheckSource() {
-  return `#!/usr/bin/env node
-// ${GUARD_MARK} — managed by Devsigner. Blocks commits outside the editable zone.
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const root = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).stdout.trim();
-let editable = ${JSON.stringify(DEFAULT_EDITABLE)};
-let restricted = ${JSON.stringify(DEFAULT_RESTRICTED)};
-const cfgPath = join(root, ".devsignerrc.json");
-if (existsSync(cfgPath)) {
-  try {
-    const c = JSON.parse(readFileSync(cfgPath, "utf8"));
-    if (Array.isArray(c.editablePaths)) editable = c.editablePaths;
-    if (Array.isArray(c.restrictedPaths)) restricted = c.restrictedPaths;
-    else if (Array.isArray(c.sensitivePaths)) restricted = c.sensitivePaths;
-  } catch {}
-}
-const g2r = (g) => new RegExp("^" + g.replace(/[.+^\${}()|[\\]\\\\]/g, "\\\\$&").replace(/\\*\\*/g, "\\0").replace(/\\*/g, "[^/]*").replace(/\\0/g, ".*") + "$");
-const any = (f, gs) => gs.some((x) => g2r(x).test(f));
-const restrictedFile = (f) => f !== ".devsignerrc.json" && !(any(f, editable) && !any(f, restricted));
-const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { encoding: "utf8" }).stdout.split("\\n").filter(Boolean);
-const bad = staged.filter(restrictedFile);
-if (bad.length) {
-  process.stderr.write("\\n\\x1b[31m\\u2717 Devsigner: commit blocked \\u2014 these files are outside the editable zone (front end):\\x1b[0m\\n");
-  for (const f of bad) process.stderr.write("    " + f + "\\n");
-  process.stderr.write("\\nBackend, auth, routing, DB, and config are protected. A developer should make\\nthese changes. To adjust the zone, edit .devsignerrc.json.\\nTo bypass once (not recommended): git commit --no-verify\\n\\n");
-  process.exit(1);
-}
-`;
-}
-
-function preCommitWrapper() {
-  return `#!/bin/sh
-# ${GUARD_MARK} — managed by Devsigner
-HOOKDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if ! command -v node >/dev/null 2>&1; then
-  echo "graft: node not found on PATH; skipping editable-zone check" >&2
-  exit 0
-fi
-exec node "$HOOKDIR/devsigner-zone-check.mjs"
-`;
-}
-
-// Install the pre-commit guard (idempotent). Backs up a pre-existing, non-Devsigner
-// pre-commit hook to pre-commit.pre-graft so we never silently clobber one.
-export function installZoneGuard(cwd) {
-  const dir = hooksDir(cwd);
-  const pre = join(dir, "pre-commit");
-  let backedUp = false;
-  if (existsSync(pre)) {
-    const cur = readFileSync(pre, "utf8");
-    if (!cur.includes(GUARD_MARK)) {
-      writeFileSync(join(dir, "pre-commit.pre-graft"), cur);
-      backedUp = true;
-    }
+// Append (or refresh) the Beacon section in CLAUDE.md; create the file if the
+// repo doesn't have one. Marker-delimited so re-running replaces, never stacks.
+export function writeClaudeMd({ cwd, branch } = {}) {
+  const root = repoRoot(cwd);
+  const path = join(root, "CLAUDE.md");
+  const section = claudeSection(branch);
+  if (!existsSync(path)) {
+    writeFileSync(path, `${section}\n`);
+    return { path, created: true };
   }
-  writeFileSync(join(dir, "devsigner-zone-check.mjs"), zoneCheckSource());
-  chmodSync(join(dir, "devsigner-zone-check.mjs"), 0o755);
-  writeFileSync(pre, preCommitWrapper());
-  chmodSync(pre, 0o755);
-  return { hooksDir: dir, backedUp };
+  const cur = readFileSync(path, "utf8");
+  const si = cur.indexOf(CLAUDE_START);
+  const ei = cur.indexOf(CLAUDE_END);
+  const next = si !== -1 && ei !== -1
+    ? cur.slice(0, si) + section + cur.slice(ei + CLAUDE_END.length)
+    : `${cur.replace(/\n*$/, "\n\n")}${section}\n`;
+  writeFileSync(path, next);
+  return { path, created: false };
 }
 
+// --- Claude Code PreToolUse guard (local install, alert-and-flag) -----------
+
+// Where Beacon keeps its local, never-committed state: <git-dir>/beacon/
+// (inside .git so `git add -A` can never sweep it into a commit).
+function beaconDir(cwd) {
+  const r = run("git", ["rev-parse", "--absolute-git-dir"], { cwd });
+  const gitDir = r.code === 0 && r.stdout ? r.stdout : join(repoRoot(cwd), ".git");
+  return join(gitDir, "beacon");
+}
+
+// Make sure a repo-local git exclude covers a path (kept out of commits without
+// touching the repo's committed .gitignore).
+function ensureExcluded(cwd, pattern) {
+  const r = run("git", ["rev-parse", "--absolute-git-dir"], { cwd });
+  if (r.code !== 0 || !r.stdout) return;
+  const info = join(r.stdout, "info");
+  mkdirSync(info, { recursive: true });
+  const path = join(info, "exclude");
+  const cur = existsSync(path) ? readFileSync(path, "utf8") : "";
+  if (cur.split("\n").includes(pattern)) return;
+  writeFileSync(path, `${cur.replace(/\n*$/, "\n")}${pattern}\n`);
+}
+
+// Remove the pre-Beacon (Devsigner-era) commit-blocking pre-commit guard, if
+// this repo still has one. Beacon flags — it never blocks — so the old hook
+// would fight the new model. Restores any backed-up original hook.
+function removeLegacyGuard(cwd) {
+  const r = run("git", ["rev-parse", "--path-format=absolute", "--git-path", "hooks"], { cwd });
+  if (r.code !== 0 || !r.stdout) return { removed: false };
+  const dir = r.stdout;
+  const pre = join(dir, "pre-commit");
+  if (!existsSync(pre) || !readFileSync(pre, "utf8").includes("devsigner-editable-zone-guard")) return { removed: false };
+  const backup = join(dir, "pre-commit.pre-graft");
+  if (existsSync(backup)) {
+    writeFileSync(pre, readFileSync(backup, "utf8"));
+    rmSync(backup, { force: true });
+  } else {
+    rmSync(pre, { force: true });
+  }
+  rmSync(join(dir, "devsigner-zone-check.mjs"), { force: true });
+  return { removed: true };
+}
+
+// Install the PreToolUse guard (idempotent):
+//   <git-dir>/beacon/guard.mjs        the checker (flags.jsonl lands beside it)
+//   .claude/settings.local.json      registers the hook for Claude Code
+// The settings file is added to .git/info/exclude so it never rides along in a
+// commit. Returns installed:false (with a reason) rather than throwing, so a
+// hook problem never stops a branch from being created.
+export function installGuard(cwd) {
+  const root = repoRoot(cwd);
+  const dir = beaconDir(cwd);
+  mkdirSync(dir, { recursive: true });
+  const guardPath = join(dir, "guard.mjs");
+  const source = readFileSync(fileURLToPath(new URL("./beacon-guard.mjs", import.meta.url)), "utf8");
+  writeFileSync(guardPath, source);
+
+  // $CLAUDE_PROJECT_DIR keeps the registration portable while the git dir sits
+  // at <root>/.git; a linked worktree gets the absolute path instead.
+  const command = dir === join(root, ".git", "beacon")
+    ? `node "$CLAUDE_PROJECT_DIR/.git/beacon/guard.mjs"`
+    : `node "${guardPath}"`;
+
+  const settingsPath = join(root, ".claude", "settings.local.json");
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); }
+    catch { return { installed: false, reason: ".claude/settings.local.json is not valid JSON — fix it and re-run start" }; }
+  }
+  settings.hooks = settings.hooks || {};
+  settings.hooks.PreToolUse = settings.hooks.PreToolUse || [];
+  const present = settings.hooks.PreToolUse.some((entry) =>
+    (entry.hooks || []).some((h) => typeof h.command === "string" && h.command.includes("beacon/guard.mjs")));
+  if (!present) {
+    settings.hooks.PreToolUse.push({
+      matcher: "Write|Edit|MultiEdit|NotebookEdit",
+      hooks: [{ type: "command", command }],
+    });
+  }
+  mkdirSync(join(root, ".claude"), { recursive: true });
+  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  ensureExcluded(cwd, ".claude/settings.local.json");
+  return { installed: true, guardPath };
+}
+
+// Create the branch off the latest default branch, declare its scope
+// (.beacon/scope.json + a CLAUDE.md section), commit both as the branch's
+// FIRST commit — the declaration shows in the PR diff before any change does —
+// then install the local Claude Code guard.
 export function start({ cwd, name }) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
   const slug = slugify(name);
@@ -521,16 +629,112 @@ export function start({ cwd, name }) {
   }
   gitMust(cwd, "switch", "-c", slug, `origin/${def}`, "--no-track");
 
-  // Designate the editable zone and install the commit-time guard.
-  const zone = ensureZoneConfig(cwd);
-  const guard = installZoneGuard(cwd);
+  // Clear any pre-Beacon commit-blocking hook BEFORE committing the scope —
+  // it would otherwise reject the declaration commit itself.
+  const legacy = removeLegacyGuard(cwd);
+
+  writeScope({ cwd, branch: slug, task: String(name).trim() });
+  const claude = writeClaudeMd({ cwd, branch: slug });
+
+  gitMust(cwd, "add", "--", SCOPE_FILE, "CLAUDE.md");
+  let committed = false;
+  if (gitFor(cwd)("diff", "--cached", "--quiet").code !== 0) {
+    gitMust(cwd, "commit", "-m", `Beacon: declare front-end scope for ${slug}`);
+    committed = true;
+  }
+
+  const guard = installGuard(cwd);
   return {
     branch: slug,
     base: `origin/${def}`,
-    zoneCreated: zone.created,
-    guardInstalled: true,
-    hooksBackedUp: guard.backedUp,
+    scopePath: SCOPE_FILE,
+    claudeMdCreated: claude.created,
+    committed,
+    guardInstalled: guard.installed,
+    guardNote: guard.reason || null,
+    legacyGuardRemoved: legacy.removed,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Public: review — flagged / out-of-scope changes on this branch, pre-PR
+// ---------------------------------------------------------------------------
+
+// Every event the guard logged for a branch, oldest first.
+function readFlagEvents(cwd, branch) {
+  const path = join(beaconDir(cwd), "flags.jsonl");
+  const events = [];
+  if (!existsSync(path)) return events;
+  for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
+    try {
+      const f = JSON.parse(line);
+      if (f.branch === branch && f.file) events.push({ ts: f.ts, file: f.file, tool: f.tool || "", reason: f.reason || "" });
+    } catch { /* skip malformed lines */ }
+  }
+  return events;
+}
+
+// Newest flag per file (for annotating the flagged-file list).
+function readFlags(cwd, branch) {
+  const byFile = new Map();
+  for (const f of readFlagEvents(cwd, branch)) byFile.set(f.file, { ts: f.ts, tool: f.tool, reason: f.reason });
+  return byFile;
+}
+
+// Why a file is out of scope — same wording whether the guard saw the write
+// or the diff scan found it.
+function scopeReason(file, cfg) {
+  const denied = cfg.deny.find((g) => globToRegex(g).test(file));
+  if (denied) return `it matches the denied pattern "${denied}" — backend, auth, routing, DB, and infra are off-limits on this branch`;
+  return "it doesn't match any allowed front-end pattern for this branch";
+}
+
+// Everything on this branch that sits outside the declared scope — the diff is
+// the source of truth (it catches writes the hook never saw), enriched with
+// the guard's flag log (when/how the agent drifted). Files that were flagged
+// but no longer differ from base are resolved, so they don't appear.
+export function review({ cwd, fetch: doFetch = false } = {}) {
+  const s = status({ cwd, fetch: doFetch });
+  const cfg = loadScope(cwd);
+  const flags = readFlags(cwd, s.branch);
+  const flagged = s.files
+    .filter((f) => f.outOfScope)
+    .map((f) => {
+      const flag = flags.get(f.file) || null;
+      return { ...f, flag, reason: (flag && flag.reason) || scopeReason(f.file, cfg) };
+    });
+  const prototype = s.files.filter((f) => f.prototype);
+  // The guard's recent activity, newest first. An event whose file no longer
+  // differs from base is resolved (reverted, or the agent self-corrected).
+  const stillFlagged = new Set(flagged.map((f) => f.file));
+  const events = readFlagEvents(cwd, s.branch).slice(-20).reverse()
+    .map((e) => ({ ...e, resolved: !stillFlagged.has(e.file) }));
+  return {
+    branch: s.branch,
+    defaultBranch: s.defaultBranch,
+    totalChanges: s.files.length,
+    inScope: s.files.length - flagged.length - prototype.length,
+    flagged,
+    prototype,
+    protoNotes: readProtoNotes(cwd),
+    events,
+    files: s.files,
+    stat: s.stat,
+  };
+}
+
+// The prototype's "what the backend needs to provide" doc, if the agent wrote
+// one — lifted into the PR description and shown in review.
+function readProtoNotes(cwd) {
+  const path = join(repoRoot(cwd), PROTO_NOTES);
+  if (!existsSync(path)) return null;
+  try {
+    let lines = readFileSync(path, "utf8").split("\n").slice(0, 40);
+    // Drop a leading title — the PR section supplies its own heading.
+    while (lines.length && !lines[0].trim()) lines.shift();
+    if (lines.length && /^#\s/.test(lines[0])) lines.shift();
+    return lines.join("\n").trim() || null;
+  } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,9 +745,10 @@ function titleFromBranch(branch) {
   return branch.replace(/^(feat|fix|chore|style)\//, "").replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function buildDeterministic({ branch, files, signal }) {
-  const sensitive = files.filter((f) => f.sensitive);
-  const editable = files.filter((f) => !f.sensitive);
+function buildDeterministic({ branch, files, signal, protoNotes }) {
+  const flagged = files.filter((f) => f.outOfScope);
+  const proto = files.filter((f) => f.prototype);
+  const inScope = files.filter((f) => !f.outOfScope && !f.prototype);
 
   const byArea = new Map();
   for (const f of files) {
@@ -561,11 +766,24 @@ function buildDeterministic({ branch, files, signal }) {
   if (!why.length) why.push("- No reused components or design tokens were auto-detected. Reviewer should confirm styling follows existing patterns.");
 
   const flags = [];
-  if (sensitive.length) flags.push(`- **Touches sensitive paths** (outside the designer editable zone):\n${sensitive.map((f) => `  - \`${f.file}\` (${f.status})`).join("\n")}`);
+  if (flagged.length) flags.push(`- **Flagged by Beacon — outside this branch's declared scope** (see \`.beacon/scope.json\`):\n${flagged.map((f) => `  - \`${f.file}\` (${f.status})`).join("\n")}`);
   if (signal.assumptions.length) flags.push(`- **Assumption markers found**:\n${signal.assumptions.map((a) => `  - \`${a}\``).join("\n")}`);
   const deletions = files.filter((f) => f.status === "deleted");
   if (deletions.length) flags.push(`- **${deletions.length} file(s) deleted** — confirm nothing depends on them.`);
   if (!flags.length) flags.push("- Nothing risky auto-detected. Standard review still recommended.");
+
+  const protoSection = proto.length ? `
+
+## Prototype (in front of the backend)
+
+This branch ships a working prototype under \`.beacon/prototype/\` — the repo's
+real components rendered on mock data, instead of touching the backend.
+
+${proto.map((f) => `- \`${f.file}\` — ${f.status}`).join("\n")}
+
+**Backend work needed to make it real:**
+
+${protoNotes || "_(no `.beacon/prototype/README.md` found — ask the author what the mocks stand in for.)_"}` : "";
 
   const body = `## What changed
 
@@ -573,8 +791,8 @@ ${whatChanged}
 
 <details><summary>All changed files (${files.length})</summary>
 
-${files.map((f) => `- \`${f.file}\` — ${f.status}${f.sensitive ? "  ⚠️ sensitive" : ""}`).join("\n")}
-</details>
+${files.map((f) => `- \`${f.file}\` — ${f.status}${f.outOfScope ? "  ⚠️ out of scope" : f.prototype ? "  ◆ prototype" : ""}`).join("\n")}
+</details>${protoSection}
 
 ## Why this approach
 
@@ -585,32 +803,35 @@ ${why.join("\n")}
 ${flags.join("\n")}
 
 ---
-_Generated by Devsigner. Editable-zone files: ${editable.length} · sensitive files: ${sensitive.length}._`;
+_Generated by Beacon. In-scope files: ${inScope.length} · prototype: ${proto.length} · flagged (out of scope): ${flagged.length}._`;
 
   return { title: titleFromBranch(branch), body, source: "deterministic" };
 }
 
-async function enrichWithLLM({ branch, files, signal, diff, anthropicKey, model }) {
+async function enrichWithLLM({ branch, files, signal, diff, protoNotes, anthropicKey, model }) {
   if (!anthropicKey) return null;
   const useModel = model || "claude-sonnet-5";
-  const prompt = `You are writing a GitHub PR description for a change made by a designer using a tool called Devsigner.
-The audience is a developer who needs to review quickly and trust the change.
+  const hasProto = files.some((f) => f.prototype);
+  const prompt = `You are writing a GitHub PR description for a front-end change made with a guardrail tool called Beacon.
+The branch declares an enforced front-end scope (.beacon/scope.json); anything outside it was flagged, not blocked.
+Files under .beacon/prototype/ are a PROTOTYPE: the repo's real components rendered on mock data, standing in for
+backend work that a developer still has to do. The audience is a developer who needs to review quickly and trust the change.
 
 Branch: ${branch}
 Changed files:
-${files.map((f) => `- ${f.file} (${f.status})${f.sensitive ? " [SENSITIVE]" : ""}`).join("\n")}
+${files.map((f) => `- ${f.file} (${f.status})${f.outOfScope ? " [FLAGGED: OUT OF SCOPE]" : f.prototype ? " [PROTOTYPE]" : ""}`).join("\n")}
 Auto-detected reused components: ${signal.components.join(", ") || "none"}
 Auto-detected reused tokens/vars: ${signal.tokens.join(", ") || "none"}
 Assumption markers: ${signal.assumptions.join(" | ") || "none"}
-
+${hasProto ? `Backend work the prototype needs (from .beacon/prototype/README.md):\n${protoNotes || "(not documented)"}\n` : ""}
 Unified diff (may be truncated):
 \`\`\`diff
 ${diff.slice(0, 12000)}
 \`\`\`
 
 Return ONLY valid JSON: {"title":"...","body":"..."} where body is GitHub markdown with exactly these
-sections: "## What changed" (plain language), "## Why this approach" (name reused components/patterns/tokens),
-and "## Flag for review" (risky or assumption-based items, especially sensitive-path changes). Be concise.`;
+sections: "## What changed" (plain language),${hasProto ? ` "## Prototype (in front of the backend)" (what the mocks stand in for and the backend work needed to make it real),` : ""} "## Why this approach" (name reused components/patterns/tokens),
+and "## Flag for review" (risky or assumption-based items — lead with any out-of-scope flagged files). Be concise.`;
 
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -623,7 +844,7 @@ and "## Flag for review" (risky or assumption-based items, especially sensitive-
     const text = data?.content?.[0]?.text ?? "";
     const json = JSON.parse(text.replace(/^```json\s*|\s*```$/g, ""));
     if (json.title && json.body) {
-      return { title: json.title, body: `${json.body}\n\n---\n_Generated by Devsigner (Claude ${useModel})._`, source: `claude:${useModel}` };
+      return { title: json.title, body: `${json.body}\n\n---\n_Generated by Beacon (Claude ${useModel})._`, source: `claude:${useModel}` };
     }
   } catch {
     return null;
@@ -636,8 +857,9 @@ export async function plan({ cwd, anthropicKey, model } = {}) {
   const s = status({ cwd, fetch: true });
   const base = baseRef(cwd, s.defaultBranch);
   const diff = fullDiff(cwd, base);
-  const llm = await enrichWithLLM({ branch: s.branch, files: s.files, signal: s.signal, diff, anthropicKey, model });
-  const annotation = llm || buildDeterministic({ branch: s.branch, files: s.files, signal: s.signal });
+  const protoNotes = readProtoNotes(cwd);
+  const llm = await enrichWithLLM({ branch: s.branch, files: s.files, signal: s.signal, diff, protoNotes, anthropicKey, model });
+  const annotation = llm || buildDeterministic({ branch: s.branch, files: s.files, signal: s.signal, protoNotes });
   return { ...s, annotation };
 }
 
@@ -646,7 +868,7 @@ export async function plan({ cwd, anthropicKey, model } = {}) {
 // ---------------------------------------------------------------------------
 
 function createPrViaGh({ cwd, title, body, base, head, token }) {
-  const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
+  const dir = mkdtempSync(join(tmpdir(), "beacon-"));
   const bodyFile = join(dir, "body.md");
   writeFileSync(bodyFile, body, "utf8");
   const env = token ? { GH_TOKEN: token } : undefined;
@@ -665,7 +887,7 @@ async function createPrViaRest({ cwd, title, body, base, head, token }) {
       authorization: `Bearer ${token}`,
       accept: "application/vnd.github+json",
       "content-type": "application/json",
-      "user-agent": "devsigner-app",
+      "user-agent": "beacon-app",
     },
     body: JSON.stringify({ title, body, base, head }),
   });
@@ -676,45 +898,41 @@ async function createPrViaRest({ cwd, title, body, base, head, token }) {
 
 // dryRun: returns {branch, defaultBranch, files, annotation} with zero side effects.
 // real:   stages, commits, pushes, opens PR. githubToken scopes the gh/REST call.
-export async function ship({ cwd, dryRun = false, title, anthropicKey, model, githubToken, allowRestricted = false } = {}) {
+export async function ship({ cwd, dryRun = false, title, anthropicKey, model, githubToken, allowFlagged = false } = {}) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
   const branch = currentBranch(cwd);
   const def = defaultBranch(cwd);
   if (!branch) throw new Error("detached HEAD — checkout a branch first");
-  if (branch === def) throw new Error(`on ${def} — run start first; graft won't ship to the default branch`);
+  if (branch === def) throw new Error(`on ${def} — run start first; Beacon won't ship to the default branch`);
 
   const p = await plan({ cwd, anthropicKey, model });
   if (!p.files.length) throw new Error("no changes to ship on this branch");
   const finalTitle = title || p.annotation.title;
-  const restricted = p.files.filter((f) => f.sensitive).map((f) => f.file);
+  const flagged = p.files.filter((f) => f.outOfScope).map((f) => f.file);
 
   if (dryRun) {
-    // Preview never mutates; surface restricted files as a warning, don't throw.
-    return { dryRun: true, branch, defaultBranch: def, files: p.files, restricted, annotation: { ...p.annotation, title: finalTitle } };
+    // Preview never mutates; surface flagged files as a warning, don't throw.
+    return { dryRun: true, branch, defaultBranch: def, files: p.files, flagged, annotation: { ...p.annotation, title: finalTitle } };
   }
 
-  // Enforce the editable zone before doing anything (the pre-commit hook is the
-  // other line of defense; this gives a clean error even if the hook was bypassed).
-  // allowRestricted is the explicit "create PR anyway" override from the UI. The
-  // out-of-zone files are still flagged for the reviewer in the PR body.
-  if (restricted.length && !allowRestricted) {
+  // The pre-PR gate: flagged changes must be looked at (and reverted or
+  // explicitly accepted) before the PR opens. allowFlagged is the "create the
+  // PR anyway" override — the files are still called out in the PR body.
+  if (flagged.length && !allowFlagged) {
     throw new Error(
-      `blocked: ${restricted.length} file(s) are outside the editable zone (front end). A developer should make these changes:\n${restricted.map((f) => `  ${f}`).join("\n")}`
+      `blocked: ${flagged.length} file(s) are outside this branch's declared scope. Review them (beacon review) or ship with them flagged:\n${flagged.map((f) => `  ${f}`).join("\n")}`
     );
   }
 
-  // Stage + commit. When overriding the zone, also skip the pre-commit guard hook
-  // (it would otherwise reject the out-of-zone files).
+  // Stage + commit.
   gitMust(cwd, "add", "-A");
   let committed = false;
   if (gitFor(cwd)("diff", "--cached", "--quiet").code !== 0) {
     const msg = [finalTitle, "", ...p.files.map((f) => `- ${f.status}: ${f.file}`)].join("\n");
-    const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
+    const dir = mkdtempSync(join(tmpdir(), "beacon-"));
     const msgFile = join(dir, "msg.txt");
     writeFileSync(msgFile, msg, "utf8");
-    const commitArgs = ["commit", "-F", msgFile];
-    if (restricted.length && allowRestricted) commitArgs.push("--no-verify");
-    gitMust(cwd, ...commitArgs);
+    gitMust(cwd, "commit", "-F", msgFile);
     committed = true;
   }
 
@@ -734,26 +952,50 @@ export async function ship({ cwd, dryRun = false, title, anthropicKey, model, gi
 // Save-your-work: commit + stash (exposed to the UI with plain-language help)
 // ---------------------------------------------------------------------------
 
-// Stage everything and commit. Out-of-zone files are allowed but flagged: the UI
-// passes allowRestricted so a designer can save freely (and the change shows in the
-// save list); the out-of-zone files are surfaced in the branch view and PR instead
-// of blocking. allowRestricted also skips the pre-commit guard hook.
-export function commit({ cwd, message, allowRestricted = false }) {
+// Stage and commit ("Save" in the UI). Out-of-scope files are allowed but
+// flagged: the UI passes allowFlagged so a designer can save freely (and the
+// change shows in the save list); the flagged files surface in the branch view
+// and the pre-PR review instead of blocking mid-task.
+//
+// Pass `files` to save just those files (the per-row Save button): only their
+// uncommitted changes are committed — everything else stays exactly as it is,
+// staged or not.
+export function commit({ cwd, message, allowFlagged = false, files } = {}) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
-  const s = status({ cwd, fetch: false });
-  if (!s.files.length) throw new Error("nothing to commit — no changes yet");
-  const restricted = s.files.filter((f) => f.sensitive).map((f) => f.file);
-  if (restricted.length && !allowRestricted) {
-    throw new Error(`can't commit — ${restricted.length} file(s) outside the editable zone:\n${restricted.map((f) => `  ${f}`).join("\n")}`);
+
+  let targets;          // the changes this commit will contain
+  let pathspec = null;  // non-null = per-file save
+  if (files && files.length) {
+    const wanted = new Set(files);
+    targets = workingChanges({ cwd }).files.filter((f) => wanted.has(f.file));
+    if (!targets.length) throw new Error("no unsaved changes in the selected file(s)");
+    pathspec = targets.map((f) => f.file);
+  } else {
+    targets = status({ cwd, fetch: false }).files;
+    if (!targets.length) throw new Error("nothing to commit — no changes yet");
   }
-  gitMust(cwd, "add", "-A");
-  const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
+
+  const flagged = targets.filter((f) => f.outOfScope).map((f) => f.file);
+  if (flagged.length && !allowFlagged) {
+    throw new Error(`can't commit — ${flagged.length} file(s) outside this branch's scope:\n${flagged.map((f) => `  ${f}`).join("\n")}`);
+  }
+
+  const fallback = pathspec && pathspec.length === 1 ? `Update ${pathspec[0].split("/").pop()}` : "Update";
+  const finalMessage = (message && message.trim()) || fallback;
+  const dir = mkdtempSync(join(tmpdir(), "beacon-"));
   const msgFile = join(dir, "msg.txt");
-  writeFileSync(msgFile, (message && message.trim()) || "Update", "utf8");
-  const args = ["commit", "-F", msgFile];
-  if (restricted.length && allowRestricted) args.push("--no-verify");
-  gitMust(cwd, ...args);
-  return { committed: true, message: (message && message.trim()) || "Update", files: s.files.length, restricted: restricted.length };
+  writeFileSync(msgFile, finalMessage, "utf8");
+
+  if (pathspec) {
+    // Stage the chosen files (covers untracked adds and deletions), then commit
+    // only that pathspec — other staged work is left untouched for a later save.
+    gitMust(cwd, "add", "--", ...pathspec);
+    gitMust(cwd, "commit", "-F", msgFile, "--", ...pathspec);
+  } else {
+    gitMust(cwd, "add", "-A");
+    gitMust(cwd, "commit", "-F", msgFile);
+  }
+  return { committed: true, message: finalMessage, files: targets.length, flagged: flagged.length };
 }
 
 // Set current changes aside (including untracked) without committing.
@@ -781,11 +1023,14 @@ export function stashPop({ cwd } = {}) {
 
 // Current uncommitted changes (staged + unstaged + untracked) — the working tree,
 // independent of the base comparison. Used for the always-visible working-tree view.
+// NOTE: porcelain output is parsed raw (no trim) — the two status columns can
+// legitimately start with a space, and trimming would eat the first path's
+// leading character. -uall lists files inside untracked directories.
 export function workingChanges({ cwd } = {}) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
-  const cfg = loadConfig(cwd);
-  const r = gitFor(cwd)("status", "--porcelain");
-  const files = (r.stdout || "").split("\n").filter(Boolean).map((line) => {
+  const cfg = loadScope(cwd);
+  const res = spawnSync("git", ["status", "--porcelain", "-uall"], { encoding: "utf8", cwd });
+  const files = (res.stdout || "").split("\n").filter(Boolean).map((line) => {
     const x = line.slice(0, 2);
     let file = line.slice(3);
     if (file.includes(" -> ")) file = file.split(" -> ")[1]; // renames
@@ -794,7 +1039,8 @@ export function workingChanges({ cwd } = {}) {
     if (x === "??" || x.includes("A")) status = "added";
     else if (x.includes("D")) status = "deleted";
     else if (x.includes("R")) status = "renamed";
-    return { file, status, sensitive: isRestricted(file, cfg) };
+    const zone = fileZone(file, cfg);
+    return { file, status, outOfScope: zone === "out", prototype: zone === "prototype" };
   });
   return { branch: currentBranch(cwd), files };
 }
@@ -807,15 +1053,16 @@ export function discard({ cwd } = {}) {
   return { discarded: true };
 }
 
-// Revert ALL changes outside the editable zone on this branch — uncommitted AND
-// already-committed — back to the base (default branch), leaving in-zone work
-// untouched. Anything that was committed is undone with one new commit (no history
-// rewrite, so it's safe on a pushed branch / open PR). The escape hatch to get a
-// branch back to only touching the editable area.
-export function revertRestricted({ cwd } = {}) {
+// Revert out-of-scope changes on this branch — uncommitted AND already-committed
+// — back to the base (default branch), leaving in-scope work untouched. Pass
+// `files` to revert specific flagged files (the per-item revert in review);
+// omit it to revert everything out of scope. Anything that was committed is
+// undone with one new commit (no history rewrite, so it's safe on a pushed
+// branch / open PR).
+export function revertOutOfScope({ cwd, files } = {}) {
   if (!isRepo(cwd)) throw new Error("not a git repository");
-  const root = gitMust(cwd, "rev-parse", "--show-toplevel");
-  const cfg = loadConfig(cwd);
+  const root = repoRoot(cwd);
+  const cfg = loadScope(cwd);
   const base = baseRef(cwd, defaultBranch(cwd));
   const g = gitFor(cwd);
 
@@ -825,10 +1072,14 @@ export function revertRestricted({ cwd } = {}) {
     for (const p of (g("diff", "--name-only", range).stdout || "").split("\n").filter(Boolean)) paths.add(p);
   }
   for (const p of untrackedFiles(cwd)) paths.add(p);
-  const restricted = [...paths].filter((f) => isRestricted(f, cfg));
-  if (!restricted.length) return { reverted: 0, committed: false, files: [] };
+  let targets = [...paths].filter((f) => isOutOfScope(f, cfg));
+  if (files && files.length) {
+    const wanted = new Set(files);
+    targets = targets.filter((f) => wanted.has(f));
+  }
+  if (!targets.length) return { reverted: 0, committed: false, files: [] };
 
-  for (const f of restricted) {
+  for (const f of targets) {
     if (g("cat-file", "-e", `${base}:${f}`).code === 0) {
       g("checkout", base, "--", f); // restore the base version (stages it)
     } else if (g("cat-file", "-e", `HEAD:${f}`).code === 0) {
@@ -839,17 +1090,19 @@ export function revertRestricted({ cwd } = {}) {
     }
   }
 
-  // If undoing committed changes staged anything, land it as one commit. --no-verify
-  // because the staged paths are (by definition) outside the zone the hook guards.
+  // If undoing committed changes staged anything, land it as one commit.
   let committed = false;
   if (g("diff", "--cached", "--quiet").code !== 0) {
-    const dir = mkdtempSync(join(tmpdir(), "devsigner-"));
+    const msg = targets.length === 1
+      ? `Beacon: revert out-of-scope change to ${targets[0]}`
+      : "Beacon: revert out-of-scope changes";
+    const dir = mkdtempSync(join(tmpdir(), "beacon-"));
     const msgFile = join(dir, "msg.txt");
-    writeFileSync(msgFile, "Revert changes outside the editable zone", "utf8");
-    gitMust(cwd, "commit", "--no-verify", "-F", msgFile);
+    writeFileSync(msgFile, msg, "utf8");
+    gitMust(cwd, "commit", "-F", msgFile);
     committed = true;
   }
-  return { reverted: restricted.length, committed, files: restricted };
+  return { reverted: targets.length, committed, files: targets };
 }
 
 // Rename a stash entry. Git can't rename in place, so we re-store the same

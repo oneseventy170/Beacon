@@ -1,11 +1,11 @@
 {
-  "name": "devsigner",
-  "version": "0.2.0",
-  "description": "A simplified git/GitHub workflow for designers, with an AI-generated annotation layer.",
+  "name": "beacon",
+  "version": "0.3.0",
+  "description": "A guardrail for AI coding agents: per-branch front-end scope declarations, real-time flags on out-of-scope writes, and one-click revert before the PR.",
   "type": "module",
   "main": "src/main/main.js",
   "bin": {
-    "devsigner": "bin/devsigner.mjs"
+    "beacon": "bin/beacon.mjs"
   },
   "scripts": {
     "start": "electron .",
@@ -16,19 +16,19 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/oneseventy170/Devsigner.git"
+    "url": "git+https://github.com/oneseventy170/Beacon.git"
   },
-  "homepage": "https://github.com/oneseventy170/Devsigner#readme",
+  "homepage": "https://github.com/oneseventy170/Beacon#readme",
   "bugs": {
-    "url": "https://github.com/oneseventy170/Devsigner/issues"
+    "url": "https://github.com/oneseventy170/Beacon/issues"
   },
   "devDependencies": {
     "electron": "^43.1.1",
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.devsigner.app",
-    "productName": "Devsigner",
+    "appId": "com.beacon.app",
+    "productName": "Beacon",
     "files": [
       "src/**/*",
       "bin/**/*",

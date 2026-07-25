@@ -267,7 +267,7 @@ html, body {
 }
 
 /* File list */
-.files { list-style: none; margin: 8px 0 0; padding: 0; }
+.files { list-style: none; margin: 0; padding: 0; }
 .files li {
   display: flex;
   align-items: center;
@@ -327,23 +327,105 @@ html, body {
 .ship-result a { color: var(--accent); cursor: pointer; text-decoration: none; }
 .ship-result a:hover { text-decoration: underline; }
 
+/* Scope cards — ONE bordered unit per concern: head (icon + title + body),
+   then any file list / punch list / actions inside the same card, separated
+   by hairlines. Cards stack with a single consistent gap. */
 .zone-warn {
-  display: flex; align-items: center; gap: 11px;
-  padding: 13px 15px;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
-  margin: 8px 0 12px;
+  margin: 0 0 12px;
+  overflow: hidden;
 }
-.zone-ico { width: 18px; height: 18px; color: var(--accent); flex: none; }
-.callout-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; }
-.callout-hint { font-size: 12px; color: var(--text-dim); }
-/* Inside the PR modal, keep the alert + its actions off the container edges. */
-.ship-preview > .zone-warn { margin: 12px 12px 8px; }
-.ship-preview > .callout-row { margin: 0 12px 14px; }
+.zone-head { display: flex; align-items: flex-start; gap: 11px; padding: 14px 16px; }
+.zone-ico { width: 18px; height: 18px; color: var(--accent); flex: none; margin-top: 1px; }
 .zone-title { font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; margin: 0 0 3px; }
-.zone-body { font-size: 12.5px; line-height: 1.55; color: var(--text-dim); margin: 0; }
+.zone-body { font-size: 12.5px; line-height: 1.55; color: var(--text-dim); margin: 0; max-width: 62ch; }
 .zone-warn code { background: color-mix(in srgb, var(--accent) 18%, transparent); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, Menlo, monospace; color: var(--text); }
+.zone-warn .files { margin: 0; padding: 2px 16px 6px; border-top: 1px solid var(--border); }
+.zone-warn .files li { padding: 8px 0; }
+.zone-warn .proto-notes { border: none; border-top: 1px solid var(--border); border-radius: 0; background: transparent; margin: 0; padding: 12px 16px 14px; }
+.zone-warn .callout-row { margin: 0; padding: 2px 16px 14px; }
+.callout-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.callout-hint { font-size: 12px; color: var(--text-dim); }
+/* Inside the PR modal, keep the card off the container edges. */
+.ship-preview > .zone-warn { margin: 12px 12px 10px; }
+
+/* Per-row action buttons on file lists (Revert on flagged, Save on unsaved) */
+.files li .btn { flex: none; margin-left: 10px; }
+.files.flagged li .btn { margin-left: auto; }
+.files.flagged li .file-status { margin-left: 0; }
+.ship-preview > .files.flagged { margin: 0 16px 10px; }
+/* Two-line flagged rows: file name with the guard's reason underneath */
+.flag-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.flag-main .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flag-reason { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.files.flagged li:has(.flag-main) .file-status { flex: none; }
+
+/* Status band under the branch title — labelled stats (saves / files / lines)
+   with the live pulse + scope pills docked right. Reads as "current status",
+   deliberately distinct from the mono dotted meta the history timelines use. */
+.stat-row { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin: 14px 0 20px; }
+.stat { display: flex; flex-direction: column; gap: 0; }
+.stat + .stat { border-left: 1px solid var(--border); padding-left: 20px; }
+.stat-num { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); line-height: 1.25; font-variant-numeric: tabular-nums; }
+.stat-num .add { color: var(--green); }
+.stat-num .del { color: var(--red); }
+.stat-label { font-size: 11px; color: var(--text-faint); }
+.stat-live { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; animation: livepulse 2.2s ease-in-out infinite; }
+@keyframes livepulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 45%, transparent); } 50% { opacity: 0.55; box-shadow: 0 0 0 4px transparent; } }
+.live-label { font-size: 12px; color: var(--text-dim); margin-right: 8px; }
+.scope-pill { font-size: 12px; font-weight: 550; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-faint); background: transparent; }
+.scope-pill.on-in { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: color-mix(in srgb, var(--green) 8%, transparent); }
+.scope-pill.on-proto { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 40%, transparent); background: color-mix(in srgb, var(--purple) 9%, transparent); }
+.scope-pill.on-flag { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); background: color-mix(in srgb, var(--red) 9%, transparent); }
+
+/* One-line hint under a section header */
+.section-hint { font-size: 12px; color: var(--text-faint); margin: -2px 0 12px; max-width: 62ch; }
+
+/* All-clear line when nothing needs attention */
+.all-clear { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--green); padding: 4px 0 2px; }
+.all-clear .ico { width: 15px; height: 15px; }
+
+/* Backend punch list inside the prototype callout */
+.proto-notes { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev); padding: 10px 14px; margin: 2px 0 12px; }
+.proto-notes-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-faint); font-weight: 600; margin-bottom: 4px; }
+.proto-notes ul { margin: 4px 0; padding-left: 18px; }
+.proto-notes code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--bg-elev-2); padding: 1px 5px; border-radius: 4px; }
+
+/* Card tags — tiny uppercase chips that say what kind of thing a card/section
+   is at a glance: red "action needed", purple "nothing to do", grey "history" */
+.zone-tag { font-size: 9.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; border-radius: 999px; padding: 2px 8px; margin-left: 8px; vertical-align: 1.5px; border: 1px solid var(--border-strong); color: var(--text-dim); white-space: nowrap; }
+.zone-tag.act { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.zone-tag.fyi { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 45%, transparent); background: color-mix(in srgb, var(--purple) 10%, transparent); }
+.zone-tag.mute { color: var(--text-dim); }
+
+/* Red variant of the callout: something to decide, not just to know */
+.zone-warn.alert { border-color: color-mix(in srgb, var(--red) 40%, transparent); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.zone-warn.alert .zone-ico { color: var(--red); }
+.zone-warn.alert code { background: color-mix(in srgb, var(--red) 15%, transparent); }
+
+/* Watch log — Beacon's record of out-of-scope writes, styled as a system log
+   (boxed inset, mono time column, tool keycap, severity edge on the left) so
+   it reads as a record, never as the Saves timeline. */
+.watchlog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-sidebar); overflow: hidden; }
+.wl-row { display: flex; align-items: baseline; gap: 10px; padding: 8px 14px 8px 12px; border-left: 2px solid var(--red); }
+.wl-row + .wl-row { border-top: 1px solid var(--border); }
+.wl-row.resolved { border-left-color: color-mix(in srgb, var(--green) 50%, transparent); opacity: 0.55; }
+.wl-time { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--text-faint); min-width: 62px; flex: none; }
+.wl-tool { font-family: ui-monospace, Menlo, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); border: 1px solid var(--border-strong); border-radius: 4px; padding: 1px 6px; flex: none; }
+.wl-text { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wl-text code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--text); background: var(--bg-elev); padding: 1px 5px; border-radius: 4px; }
+.wl-row.resolved .wl-text code { text-decoration: line-through; }
+.wl-state { flex: none; font-size: 11px; font-weight: 550; color: var(--red); }
+.wl-row.resolved .wl-state { color: var(--green); }
+
+/* Branches | PRs tabs in the list header */
+.list-tabs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; }
+.list-tab { -webkit-app-region: no-drag; background: none; border: none; color: var(--text-dim); font: inherit; font-size: 13px; font-weight: 550; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.12s ease, color 0.12s ease; }
+.list-tab:hover { color: var(--text); background: var(--bg-elev); }
+.list-tab.active { color: var(--text); background: var(--bg-elev-2); }
 
 /* ---- Two-pane workspace: activity list | detail ---- */
 .workspace {
@@ -447,8 +529,8 @@ html, body {
 
 /* ---- Branch activity view (the working surface) ---- */
 .branch-view { display: flex; flex-direction: column; height: 100%; }
-.branch-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 28px 32px; }
-.agents-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.branch-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 28px 32px 44px; }
+.agents-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 0; }
 
 /* Sticky action bar: save / stash / restore on the left, Create PR on the right */
 .action-bar {
@@ -461,6 +543,9 @@ html, body {
 .action-bar .ab-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .action-bar .ab-right { flex: none; }
 .ab-msg { flex: 1; max-width: 420px; }
+/* One control height across the bar — the input, the small buttons, and the
+   Create PR CTA all sit on the same 30px line. */
+.action-bar .btn, .action-bar .input { height: 30px; padding-top: 0; padding-bottom: 0; }
 
 /* +adds / −dels colouring in save/file rows */
 .commit-meta .add, .file-status .add { color: var(--green); }
@@ -468,8 +553,8 @@ html, body {
 
 /* PR / stash detail */
 .detail-title { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 6px; }
-.detail-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-bottom: 18px; }
-.detail-section-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-faint); margin: 22px 0 8px; font-weight: 600; }
+.detail-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-bottom: 14px; }
+.detail-section-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-faint); margin: 28px 0 8px; font-weight: 600; }
 .detail-body { font-size: 13px; }
 .detail-body h2 { font-size: 13px; color: var(--text); font-weight: 600; margin: 14px 0 6px; }
 .detail-body ul { margin: 4px 0; padding-left: 18px; }

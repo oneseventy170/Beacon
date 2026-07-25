@@ -1,4 +1,4 @@
-// Renderer — talks to the engine only through window.graft (preload bridge).
+// Beacon renderer — talks to the engine only through window.beacon (preload bridge).
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -8,8 +8,9 @@ const state = {
   gh: { installed: false, authed: false, login: null },
   sync: { behind: 0, ahead: 0, upstream: null },
   skipSync: false, // set when the user dismisses the "pull first" onboarding step
-  query: "", searchOpen: false, // activity-list filter
-  collapsed: new Set(["cancelled", "setaside"]), // collapsed group keys (secondary groups start closed)
+  query: "", searchOpen: false, // list filter
+  tab: "branches", // left list: "branches" (live work) | "prs" (shipped + set aside)
+  collapsed: new Set(["deleted", "stashes"]), // collapsed group keys (secondary groups start closed)
 };
 let ghPoll = null;
 const isDirty = () => state.working.length > 0;
@@ -41,9 +42,14 @@ const ICONS = {
   "pull": `<path d="M205.66,149.66l-72,72a8,8,0,0,1-11.32,0l-72-72a8,8,0,0,1,11.32-11.32L120,196.69V40a8,8,0,0,1,16,0V196.69l58.34-58.35a8,8,0,0,1,11.32,11.32Z"/>`,
 };
 function icon(name, cls = "") { return `<svg class="ico ${cls}" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">${ICONS[name] || ""}</svg>`; }
-// Editable-zone callout: lighthouse icon + a title and body (body may contain HTML).
-function zoneCallout(title, body) {
-  return `<div class="zone-warn">${icon("lighthouse", "zone-ico")}<div><p class="zone-title">${title}</p><p class="zone-body">${body}</p></div></div>`;
+// Scope card: the Beacon lighthouse + a title and body, with any related
+// content (file lists, punch lists, actions) passed as `extra` so it renders
+// INSIDE the card — one bordered unit, nothing floating between cards.
+// cls "alert" turns the card red (act now); the default purple reads as FYI.
+// tag adds a small uppercase chip after the title ("action needed", "history"…).
+function zoneCallout(title, body, { cls = "", tag = null, extra = "" } = {}) {
+  const chip = tag ? `<span class="zone-tag ${tag.cls || ""}">${esc(tag.text)}</span>` : "";
+  return `<div class="zone-warn ${cls}"><div class="zone-head">${icon("lighthouse", "zone-ico")}<div><p class="zone-title">${title}${chip}</p><p class="zone-body">${body}</p></div></div>${extra}</div>`;
 }
 function busy(btn, on, label) { if (!btn) return; if (on) { btn._label = btn.innerHTML; btn.innerHTML = `<span class="spinner"></span> ${label || ""}`.trim(); btn.disabled = true; } else { btn.innerHTML = btn._label ?? btn.innerHTML; btn.disabled = false; } }
 async function call(fn, ...args) { const res = await fn(...args); if (!res.ok) { toast(res.error); throw new Error(res.error); } return res.data; }
@@ -61,7 +67,6 @@ function renderMarkdown(md) {
     else { cl(); html += `<p>${il(line)}</p>`; } }
   cl(); return html;
 }
-const fileLi = (f) => `<li><span class="dot ${f.sensitive ? "red" : "green"}"></span><span class="file-name">${esc(f.file)}</span><span class="file-status">${esc(f.status)}${f.sensitive ? " · outside zone" : ""}</span></li>`;
 
 // Inline name/rename dialog (Electron blocks window.prompt). Resolves to the
 // trimmed value, or null if cancelled.
@@ -84,7 +89,7 @@ function promptName({ title, initial = "", ok = "Save" }) {
 async function doStash() {
   const name = await promptName({ title: "Name this stash", ok: "Stash", initial: "" });
   if (name == null) return false;
-  await call(window.graft.stash, state.cwd, name);
+  await call(window.beacon.stash, state.cwd, name);
   toast(`Stashed: ${name}`);
   return true;
 }
@@ -109,7 +114,7 @@ function renderTopnav() {
 }
 
 // --- GitHub connection (onboarding) -----------------------------------------
-async function loadGh() { try { state.gh = await call(window.graft.ghStatus); } catch {} }
+async function loadGh() { try { state.gh = await call(window.beacon.ghStatus); } catch {} }
 function renderGhChip() {
   const el = $("gh-status"); if (!el) return;
   const g = state.gh || {};
@@ -117,7 +122,7 @@ function renderGhChip() {
     el.className = "gh-chip warn";
     el.innerHTML = `${icon("x-circle")}<span>GitHub CLI not found</span>`;
     el.title = "Install the GitHub CLI (gh) to open pull requests";
-    el.onclick = () => window.graft.openExternal("https://cli.github.com");
+    el.onclick = () => window.beacon.openExternal("https://cli.github.com");
   } else if (!g.authed) {
     el.className = "gh-chip action";
     el.innerHTML = `${icon("pull-request")}<span>Connect GitHub</span>`;
@@ -144,7 +149,7 @@ function ghMenu() {
 // `gh auth switch` in Terminal, then poll until the active login changes.
 async function switchGhAccount() {
   const prev = state.gh && state.gh.login;
-  try { await call(window.graft.ghAuthSwitch); } catch { return; }
+  try { await call(window.beacon.ghAuthSwitch); } catch { return; }
   toast("Pick an account in the Terminal window — it'll update here.");
   const el = $("gh-status");
   if (el) { el.className = "gh-chip action"; el.innerHTML = `<span class="spinner"></span><span>Switching…</span>`; el.onclick = () => recheckGh(); }
@@ -159,8 +164,8 @@ async function switchGhAccount() {
 }
 // Launch `gh auth login` in Terminal, then poll until the user finishes.
 async function connectGh() {
-  if (state.gh && !state.gh.installed) { window.graft.openExternal("https://cli.github.com"); return; }
-  try { await call(window.graft.ghAuthLogin); } catch { return; }
+  if (state.gh && !state.gh.installed) { window.beacon.openExternal("https://cli.github.com"); return; }
+  try { await call(window.beacon.ghAuthLogin); } catch { return; }
   toast("Complete GitHub sign-in in the Terminal window that opened.");
   const el = $("gh-status");
   if (el) { el.className = "gh-chip action"; el.innerHTML = `<span class="spinner"></span><span>Waiting for sign-in…</span>`; el.onclick = () => recheckGh(); }
@@ -283,10 +288,10 @@ async function confirmDeleteBranch(name) {
   const pretty = prettyBranch(name);
   if (!(await confirmDialog({ title: `Delete branch “${pretty}”?` }))) return;
   // Safe delete first; if git reports unmerged commits, confirm again to force.
-  let res = await window.graft.deleteBranch(state.cwd, name, false);
+  let res = await window.beacon.deleteBranch(state.cwd, name, false);
   if (!res.ok && /unmerged/i.test(res.error || "")) {
     if (!(await confirmDialog({ title: `“${pretty}” has commits not merged anywhere. Delete anyway?`, ok: "Delete anyway" }))) return;
-    res = await window.graft.deleteBranch(state.cwd, name, true);
+    res = await window.beacon.deleteBranch(state.cwd, name, true);
   }
   if (!res.ok) { toast(res.error); return; }
   toast(`Deleted “${pretty}”`);
@@ -295,12 +300,12 @@ async function confirmDeleteBranch(name) {
 
 async function confirmDropStash(index) {
   if (!(await confirmDialog({ title: "Delete this stash? This can’t be undone." }))) return;
-  try { await call(window.graft.dropStash, state.cwd, index); toast("Stash deleted"); await reloadRepoState(); goHome(); } catch {}
+  try { await call(window.beacon.dropStash, state.cwd, index); toast("Stash deleted"); await reloadRepoState(); goHome(); } catch {}
 }
 
 // The repo button opens the OS folder picker directly (no menu — there was only
 // ever one option).
-async function openRepo() { const dir = await call(window.graft.pickFolder); if (dir) await loadContext(dir); }
+async function openRepo() { const dir = await call(window.beacon.pickFolder); if (dir) await loadContext(dir); }
 function branchMenu() {
   if (!(state.ctx && state.ctx.isRepo)) return;
   const def = state.ctx.defaultBranch, cur = state.ctx.branch;
@@ -340,9 +345,9 @@ function section(key, label, count, color, bodyHTML) {
   const head = `<li class="group-head ${collapsed ? "collapsed" : ""}" data-group="${key}">${icon("caret-down", "group-chev")}<span class="group-dot" style="background:${color}"></span><span class="group-name">${label}</span><span class="group-count">${count}</span></li>`;
   return head + (collapsed ? "" : bodyHTML);
 }
-// The unified activity list: a branch and its eventual PR are the SAME piece of
-// work moving through statuses. In progress (unshipped branches) → In review
-// (open PRs) → Done (merged) / Cancelled (closed). Stashes tuck into "Set aside".
+// Two tabs, designer-legible: BRANCHES is where work happens (working tree +
+// in-progress branches + stashed changes, live-updating); PRS is where work
+// goes after (in review → done / deleted).
 function renderList() {
   const ul = $("rows");
   if (!state.ctx || !state.ctx.isRepo) { ul.innerHTML = `<li class="list-empty">Open a repository to see its activity.</li>`; return; }
@@ -368,28 +373,32 @@ function renderList() {
   };
 
   let html = "";
-  // Pinned Working tree row — uncommitted changes are always reachable here.
-  if (showWorking) {
-    html += rowHTML({ cls: "working", type: "working", iconName: "pencil", col: "var(--amber)",
-      title: "Working tree", sub: `${state.working.length} uncommitted change${state.working.length > 1 ? "s" : ""} · on ${state.ctx.branch}` });
-  }
-  html += sect("inprogress", "In progress", "var(--blue)", inProgress,
-    (b) => rowHTML({ cls: "branch", type: "branch", id: b.name, iconName: "branch", col: "var(--blue)",
-      title: prettyBranch(b.name), sub: `${b.name}${b.date ? ` · ${ago(b.date)}` : ""}`, tag: b.current ? "current" : "" }),
-    "Nothing in progress — start a new branch.");
-  if (!state.prsAvailable) {
-    if (!q) html += state.gh && state.gh.authed
-      ? `<li class="list-empty sub">No GitHub remote found for this repo.</li>`
-      : `<li class="list-empty sub"><button class="linklike" data-connect>Connect GitHub</button> to track pull requests.</li>`;
+  if (state.tab === "branches") {
+    // Pinned Working tree row — uncommitted changes are always reachable here.
+    if (showWorking) {
+      html += rowHTML({ cls: "working", type: "working", iconName: "pencil", col: "var(--amber)",
+        title: "Working tree", sub: `${state.working.length} uncommitted change${state.working.length > 1 ? "s" : ""} · on ${state.ctx.branch}` });
+    }
+    html += sect("inprogress", "In progress", "var(--blue)", inProgress,
+      (b) => rowHTML({ cls: "branch", type: "branch", id: b.name, iconName: "branch", col: "var(--blue)",
+        title: prettyBranch(b.name), sub: `${b.name}${b.date ? ` · ${ago(b.date)}` : ""}`, tag: b.current ? "current" : "" }),
+      "Nothing in progress — start a new branch.");
+    // Stashes are set-aside WORKING changes, so they live with branches.
+    if (stashes.length) {
+      html += section("stashes", "Stashes", stashes.length, "var(--mute)",
+        stashes.map((s) => rowHTML({ cls: "stash", type: "stash", id: s.index, iconName: "archive", col: "var(--mute)",
+          title: s.label, sub: `stash@{${s.index}}` })).join(""));
+    }
   } else {
-    html += sect("inreview", "In review", "var(--green)", open, prRow, "Nothing in review.");
-    html += sect("done", "Done", "var(--purple)", merged, prRow, "Nothing merged yet.");
-    if (closed.length) html += section("cancelled", "Cancelled", closed.length, "var(--red)", closed.map(prRow).join(""));
-  }
-  if (stashes.length) {
-    html += section("setaside", "Set aside", stashes.length, "var(--mute)",
-      stashes.map((s) => rowHTML({ cls: "stash", type: "stash", id: s.index, iconName: "archive", col: "var(--mute)",
-        title: s.label, sub: `stash@{${s.index}}` })).join(""));
+    if (!state.prsAvailable) {
+      if (!q) html += state.gh && state.gh.authed
+        ? `<li class="list-empty sub">No GitHub remote found for this repo.</li>`
+        : `<li class="list-empty sub"><button class="linklike" data-connect>Connect GitHub</button> to track pull requests.</li>`;
+    } else {
+      html += sect("inreview", "In review", "var(--green)", open, prRow, "Nothing in review.");
+      html += sect("done", "Done", "var(--purple)", merged, prRow, "Nothing merged yet.");
+      if (closed.length) html += section("deleted", "Deleted", closed.length, "var(--red)", closed.map(prRow).join(""));
+    }
   }
   if (q && !html.trim()) html = `<li class="list-empty">No matches for “${esc(state.query.trim())}”.</li>`;
   ul.innerHTML = html;
@@ -416,7 +425,7 @@ async function switchBranch(name) {
   const land = () => (name === state.ctx.defaultBranch ? goHome() : selectBranch(name));
   if (state.ctx && state.ctx.branch === name) { land(); return; }
   try {
-    await call(window.graft.checkout, state.cwd, name);
+    await call(window.beacon.checkout, state.cwd, name);
     toast(`Switched to ${name}`);
     await reloadRepoState();
     land();
@@ -462,11 +471,11 @@ function renderConnectStep(es, g) {
     <div class="empty-illus">${icon("pull-request")}</div>
     <h2>${inst ? "Connect your GitHub account" : "Install the GitHub CLI"}</h2>
     <p class="empty-msg">${inst
-      ? "Sign in once so Devsigner can open pull requests for you. Devsigner stores nothing — your GitHub CLI handles the sign-in."
-      : "Devsigner uses the GitHub CLI (gh) to open pull requests. Install it from cli.github.com, then connect."}</p>
+      ? "Sign in once so Beacon can open pull requests for you. Beacon stores nothing — your GitHub CLI handles the sign-in."
+      : "Beacon uses the GitHub CLI (gh) to open pull requests. Install it from cli.github.com, then connect."}</p>
     <button class="btn signal" id="ob-gh">${inst ? "Connect GitHub" : "Get the GitHub CLI"}</button>
     ${onboardProgress(0)}`;
-  es.querySelector("#ob-gh").addEventListener("click", () => inst ? connectGh() : window.graft.openExternal("https://cli.github.com"));
+  es.querySelector("#ob-gh").addEventListener("click", () => inst ? connectGh() : window.beacon.openExternal("https://cli.github.com"));
 }
 function renderSelectRepoStep(es) {
   es.innerHTML = `
@@ -489,7 +498,7 @@ function renderUpdateStep(es) {
     </div>`;
   es.querySelector("#ob-pull").addEventListener("click", async () => {
     const b = es.querySelector("#ob-pull"); busy(b, true, "Pulling");
-    try { await call(window.graft.pull, state.cwd); toast("Pulled the latest changes"); await reloadRepoState(); showEmpty(); }
+    try { await call(window.beacon.pull, state.cwd); toast("Pulled the latest changes"); await reloadRepoState(); showEmpty(); }
     catch { busy(b, false); }
   });
   es.querySelector("#ob-skip").addEventListener("click", () => { state.skipSync = true; showEmpty(); });
@@ -499,7 +508,7 @@ function renderCreateStep(es) {
   es.innerHTML = `
     <div class="empty-illus">${icon("branch")}</div>
     <h2>Start a new branch</h2>
-    <p class="empty-msg">Describe what you're changing — Devsigner branches off the latest ${esc(state.ctx.defaultBranch)} so you get a safe copy to work in.</p>
+    <p class="empty-msg">Describe what you're changing — Beacon branches off the latest ${esc(state.ctx.defaultBranch)} and declares a front-end scope for the branch, so an agent that drifts outside it gets flagged.</p>
     <div class="create-row">
       <input id="create-name" class="input" type="text" placeholder="e.g. update the pricing page" autocomplete="off" ${dirty ? "disabled" : ""} />
       <button class="btn signal" id="create-start" ${dirty ? "disabled" : ""}>Create branch</button>
@@ -524,8 +533,8 @@ async function startBranch(name) {
   if (!(state.ctx && state.ctx.isRepo)) return;
   if (isDirty()) { toast("Save or set aside your current changes first"); selectWorking(); return; }
   try {
-    const r = await call(window.graft.start, state.cwd, name.trim());
-    toast(`Started ${r.branch}`);
+    const r = await call(window.beacon.start, state.cwd, name.trim());
+    toast(`Started ${r.branch} · front-end scope declared${r.committed ? " (first commit)" : ""}`);
     await reloadRepoState();
     selectBranch(r.branch);
   } catch {}
@@ -549,7 +558,7 @@ function agentButtonsHTML() {
 }
 function bindAgents(root) {
   root.querySelectorAll("button[data-agent]").forEach((b) => b.addEventListener("click", async () => {
-    try { await call(window.graft.openIn, b.dataset.agent, state.cwd); toast(`Opening in ${b.dataset.agent}…`); } catch {}
+    try { await call(window.beacon.openIn, b.dataset.agent, state.cwd); toast(`Opening in ${b.dataset.agent}…`); } catch {}
   }));
 }
 
@@ -561,31 +570,79 @@ async function selectBranch(name, sel) {
   state.selected = token;
   renderList(); renderTopnav();
   showDetail(`<div class="branch-view"><div class="branch-scroll"><div class="muted"><span class="spinner"></span> Loading…</div></div></div>`, true);
-  let log = { commits: [] }, st = null;
+  let log = { commits: [] }, rv = null;
   await loadWorking().catch(() => {});
-  try { log = await call(window.graft.branchLog, state.cwd); } catch {}
-  try { st = await call(window.graft.status, state.cwd); } catch {}
+  try { log = await call(window.beacon.branchLog, state.cwd); } catch {}
+  try { rv = await call(window.beacon.review, state.cwd); } catch {}
   if (state.selected !== token) return; // user navigated away while loading
-  renderBranchView(name, log, st);
+  renderBranchView(name, log, rv);
 }
 // The Working tree row → the current branch's activity view (commit / stash /
 // restore live in its action bar), with the Working tree row kept highlighted.
 function selectWorking() { if (state.ctx && state.ctx.isRepo) selectBranch(state.ctx.branch, { type: "working" }); }
-function renderBranchView(name, log, st) {
+function renderBranchView(name, log, rv) {
   const commits = log.commits || [];
   const dirty = isDirty();
-  const changed = st ? st.files.length : state.working.length;
-  const restricted = state.working.filter((f) => f.sensitive).length;
-  const ozTotal = st ? st.files.filter((f) => f.sensitive).length : restricted;
-  const diffStat = st && st.stat ? st.stat.replace(/^\s*\d+ files? changed,?\s*/, "") : "";
+  const files = rv ? rv.files : state.working;
+  const changed = files.length;
+  const ozFiles = rv ? rv.flagged : state.working.filter((f) => f.outOfScope);
+  const ozTotal = ozFiles.length;
+  const protoFiles = rv ? rv.prototype : state.working.filter((f) => f.prototype);
+  const inScope = changed - ozTotal - protoFiles.length;
   const agents = agentButtonsHTML();
 
+  // The status band: today's numbers as labelled stats (deliberately NOT the
+  // dotted mono line the Saves history uses), with the live pulse and scope
+  // pills docked right. Everything here moves as the agent works — nothing
+  // needs to be saved/committed to show up.
+  const adds = rv && rv.stat ? (rv.stat.match(/(\d+) insertions?\(/) || [])[1] : null;
+  const dels = rv && rv.stat ? (rv.stat.match(/(\d+) deletions?\(/) || [])[1] : null;
+  const strip = `
+    <div class="stat-row">
+      <div class="stat"><span class="stat-num">${commits.length}</span><span class="stat-label">save${commits.length !== 1 ? "s" : ""}</span></div>
+      <div class="stat"><span class="stat-num">${changed}</span><span class="stat-label">file${changed !== 1 ? "s" : ""} changed</span></div>
+      ${adds || dels ? `<div class="stat"><span class="stat-num"><span class="add">+${adds || 0}</span> <span class="del">−${dels || 0}</span></span><span class="stat-label">lines</span></div>` : ""}
+      <div class="stat-live">
+        <span class="live-dot" title="Beacon is watching this repo — updates appear as files change"></span>
+        <span class="live-label">watching live</span>
+        <span class="scope-pill ${inScope ? "on-in" : ""}">${inScope} in scope</span>
+        <span class="scope-pill ${protoFiles.length ? "on-proto" : ""}">${protoFiles.length} prototype</span>
+        <span class="scope-pill ${ozTotal ? "on-flag" : ""}">${ozTotal} flagged</span>
+      </div>
+    </div>`;
+
+  // WHAT TO LOOK OUT FOR — the current state, colour-coded for a designer:
+  // RED card = decide something before the PR. PURPLE card = good to know,
+  // nothing to do. Green line = all clear.
   const zoneNote = ozTotal ? zoneCallout(
-    "Outside the editable zone",
-    `${ozTotal} change${ozTotal > 1 ? "s" : ""} on this branch ${ozTotal > 1 ? "touch" : "touches"} files outside the editable zone. You can still save and open a PR — Devsigner flags ${ozTotal > 1 ? "them" : "it"} for a developer — or use “Revert out-of-zone” to restore ${ozTotal > 1 ? "them" : "it"}.`) : "";
+    "Flagged — decide before the PR",
+    `Nothing was blocked, but ${ozTotal === 1 ? "this change" : "these changes"} sit${ozTotal === 1 ? "s" : ""} outside the front-end scope declared for this branch. Revert what shouldn't ship; anything kept is flagged for the developer in the PR.`,
+    { cls: "alert", tag: { text: "action needed", cls: "act" },
+      extra: `<ul class="files flagged">${ozFiles.map((f) => `<li><span class="dot red"></span><div class="flag-main"><span class="file-name">${esc(f.file)}</span><span class="flag-reason">${esc(f.reason || "outside the declared scope")}</span></div><span class="file-status">${esc(f.status)}</span><button class="btn small danger-btn" data-revert-file="${esc(f.file)}">Revert</button></li>`).join("")}</ul>` }) : "";
+  const protoNote = protoFiles.length ? zoneCallout(
+    "Prototype — built in front of the backend",
+    `${protoFiles.length} file${protoFiles.length > 1 ? "s" : ""} under <code>.beacon/prototype/</code> render the repo's real components on mock data instead of touching the backend.`,
+    { tag: { text: "nothing to do", cls: "fyi" },
+      extra: `<ul class="files">${protoFiles.map((f) => `<li><span class="dot mute"></span><span class="file-name">${esc(f.file)}</span><span class="file-status">${esc(f.status)}</span></li>`).join("")}</ul>`
+        + (rv && rv.protoNotes ? `<div class="proto-notes"><div class="proto-notes-h">Backend work needed to make it real</div>${renderMarkdown(rv.protoNotes)}</div>` : "") }) : "";
+  const allClear = !ozTotal && !protoFiles.length && changed
+    ? `<div class="all-clear">${icon("check")} Everything on this branch is inside the declared front-end scope.</div>` : "";
+
+  // WHAT BEACON NOTICED — pure history, rendered as a boxed watch log (mono
+  // time column, tool keycap, severity edge) so it can't be mistaken for the
+  // Saves timeline. Nothing here is actionable; resolved drifts stay, dimmed
+  // and struck through, so the story stays complete.
+  const events = (rv && rv.events) || [];
+  const drift = events.length ? `
+    <div class="detail-section-h">What Beacon noticed <span class="zone-tag mute">history</span></div>
+    <div class="section-hint">What Beacon noticed while the agent worked — anything you've already dealt with stays here, dimmed.</div>
+    <div class="watchlog">${events.map((e) => `<div class="wl-row ${e.resolved ? "resolved" : ""}" title="${esc(e.reason || "")}"><span class="wl-time">${esc(ago(e.ts))}</span><span class="wl-tool">${esc(e.tool || "write")}</span><span class="wl-text">went outside the scope — <code>${esc(e.file)}</code></span><span class="wl-state">${e.resolved ? "resolved" : "still flagged"}</span></div>`).join("")}</div>` : "";
+
+  // Each unsaved row gets its own Save — commit just that file, leaving the
+  // rest of the working tree untouched (same button style as the per-row Revert).
   const unsaved = dirty ? `
     <div class="detail-section-h">Unsaved changes (${state.working.length})</div>
-    <ul class="files">${state.working.map(fileLi).join("")}</ul>` : "";
+    <ul class="files">${state.working.map((f) => `<li><span class="dot ${f.outOfScope ? "red" : f.prototype ? "mute" : "green"}"></span><span class="file-name">${esc(f.file)}</span><span class="file-status">${esc(f.status)}${f.outOfScope ? " · out of scope" : f.prototype ? " · prototype" : ""}</span><button class="btn small" data-save-file="${esc(f.file)}" title="Save (commit) just this file">Save</button></li>`).join("")}</ul>` : "";
 
   const saves = commits.length
     ? `<div class="graph">${commits.map((c) => `<div class="commit"><div class="commit-msg">${esc(c.message)}</div><div class="commit-meta">${esc(c.oid)} · ${esc(ago(c.date))} · ${c.files} file${c.files !== 1 ? "s" : ""} · <span class="add">+${c.additions}</span> <span class="del">−${c.deletions}</span></div></div>`).join("")}</div>`
@@ -597,17 +654,16 @@ function renderBranchView(name, log, st) {
     <div class="branch-view">
       <div class="branch-scroll">
         <h1 class="detail-title">${esc(prettyBranch(name))}</h1>
-        <div class="detail-meta">
-          <span class="badge dim">${esc(name)}</span>
-          <span>${commits.length} save${commits.length !== 1 ? "s" : ""}</span>
-          <span>·</span><span>${changed} file${changed !== 1 ? "s" : ""} changed</span>
-          ${diffStat ? `<span>·</span><span>${esc(diffStat)}</span>` : ""}
-        </div>
+        ${strip}
         ${agents ? `<div class="agents-row">${agents}</div>` : ""}
+        <div class="detail-section-h">What to look out for</div>
         ${zoneNote}
+        ${protoNote}
+        ${allClear || (!changed ? `<div class="muted">No changes yet — open the repo in an agent and direct it; edits show up here as they happen.</div>` : "")}
         ${unsaved}
         <div class="detail-section-h">Saves</div>
         ${saves}
+        ${drift}
       </div>
       <div class="action-bar">
         <div class="ab-left">
@@ -615,7 +671,7 @@ function renderBranchView(name, log, st) {
           <button class="btn primary small" id="ab-save" ${dirty ? "" : "disabled"}>Save</button>
           <button class="btn small" id="ab-stash" ${dirty ? "" : "disabled"}>Stash</button>
           <button class="btn small" id="ab-restore" ${state.stashes.length ? "" : "disabled"}>Restore stash</button>
-          <button class="btn small danger-btn" id="ab-revert" ${ozTotal ? "" : "disabled"} title="Revert the changes outside the editable zone">Revert out-of-zone</button>
+          <button class="btn small danger-btn" id="ab-revert" ${ozTotal ? "" : "disabled"} title="Revert every change Beacon flagged as out of scope">Revert flagged</button>
         </div>
         <div class="ab-right">
           <button class="btn primary" id="ab-createpr" ${canPR ? "" : "disabled"}>${icon("pull-request")} Create PR</button>
@@ -628,13 +684,30 @@ function renderBranchView(name, log, st) {
   view.querySelector("#ab-save").addEventListener("click", async () => {
     const msg = view.querySelector("#ab-msg").value.trim();
     const btn = view.querySelector("#ab-save"); busy(btn, true, "Saving");
-    try { const r = await call(window.graft.commit, state.cwd, msg, true); toast(r.restricted ? `Saved · ${r.restricted} file${r.restricted > 1 ? "s" : ""} flagged for a developer` : "Saved"); await reRender(); } catch { busy(btn, false); }
+    try { const r = await call(window.beacon.commit, state.cwd, msg, true); toast(r.flagged ? `Saved · ${r.flagged} file${r.flagged > 1 ? "s" : ""} flagged as out of scope` : "Saved"); await reRender(); } catch { busy(btn, false); }
   });
   view.querySelector("#ab-msg").addEventListener("keydown", (e) => { if (e.key === "Enter") view.querySelector("#ab-save").click(); });
   view.querySelector("#ab-stash").addEventListener("click", async () => { try { if (await doStash()) await reRender(); } catch {} });
-  view.querySelector("#ab-restore").addEventListener("click", async () => { const b = view.querySelector("#ab-restore"); busy(b, true, ""); try { await call(window.graft.stashPop, state.cwd); toast("Stash restored"); await reRender(); } catch { busy(b, false); } });
+  view.querySelector("#ab-restore").addEventListener("click", async () => { const b = view.querySelector("#ab-restore"); busy(b, true, ""); try { await call(window.beacon.stashPop, state.cwd); toast("Stash restored"); await reRender(); } catch { busy(b, false); } });
   const rz = view.querySelector("#ab-revert");
-  if (rz) rz.addEventListener("click", async () => { busy(rz, true, "Reverting"); try { const res = await call(window.graft.revertRestricted, state.cwd); toast(res.reverted ? `Reverted ${res.reverted} out-of-zone change${res.reverted > 1 ? "s" : ""}${res.committed ? " · new commit" : ""}` : "No out-of-zone changes to revert"); await reRender(); } catch { busy(rz, false); } });
+  if (rz) rz.addEventListener("click", async () => { busy(rz, true, "Reverting"); try { const res = await call(window.beacon.revertOutOfScope, state.cwd); toast(res.reverted ? `Reverted ${res.reverted} flagged change${res.reverted > 1 ? "s" : ""}${res.committed ? " · new commit" : ""}` : "No flagged changes to revert"); await reRender(); } catch { busy(rz, false); } });
+  // Per-file revert on the flagged list — the one-click undo for a single drift.
+  view.querySelectorAll("button[data-revert-file]").forEach((b) => b.addEventListener("click", async () => {
+    const file = b.dataset.revertFile;
+    busy(b, true, "");
+    try { const res = await call(window.beacon.revertOutOfScope, state.cwd, [file]); toast(res.reverted ? `Reverted ${file}${res.committed ? " · new commit" : ""}` : "Nothing to revert"); await reRender(); }
+    catch { busy(b, false); }
+  }));
+  // Per-file save on the unsaved list — commit only that file. Uses the message
+  // from the bar if one is typed, else a sensible per-file default.
+  view.querySelectorAll("button[data-save-file]").forEach((b) => b.addEventListener("click", async () => {
+    const file = b.dataset.saveFile;
+    const msgEl = view.querySelector("#ab-msg");
+    const msg = msgEl ? msgEl.value.trim() : "";
+    busy(b, true, "");
+    try { const r = await call(window.beacon.commit, state.cwd, msg, true, [file]); toast(r.flagged ? `Saved ${file} · flagged as out of scope` : `Saved ${file}`); await reRender(); }
+    catch { busy(b, false); }
+  }));
   view.querySelector("#ab-createpr").addEventListener("click", () => createPR());
 }
 
@@ -656,7 +729,7 @@ async function createPR() {
   if (!(state.gh && state.gh.authed)) {
     // Not connected — turn the modal into a connect prompt.
     const inst = !!(state.gh && state.gh.installed);
-    preview.innerHTML = `<div class="connect-panel">${icon("pull-request", "cp-ico")}<div><div class="cp-title">${inst ? "Connect GitHub to open a pull request" : "GitHub CLI not found"}</div><p class="muted">${inst ? "Sign in once and Devsigner can push your branch and open the PR for you. Devsigner stores nothing — your GitHub CLI handles the sign-in." : "Install the GitHub CLI (gh) from cli.github.com, then connect your account here."}</p></div></div>`;
+    preview.innerHTML = `<div class="connect-panel">${icon("pull-request", "cp-ico")}<div><div class="cp-title">${inst ? "Connect GitHub to open a pull request" : "GitHub CLI not found"}</div><p class="muted">${inst ? "Sign in once and Beacon can push your branch and open the PR for you. Beacon stores nothing — your GitHub CLI handles the sign-in." : "Install the GitHub CLI (gh) from cli.github.com, then connect your account here."}</p></div></div>`;
     confirm.textContent = inst ? "Connect GitHub" : "Get the GitHub CLI";
     confirm.disabled = false;
     onConfirm = () => { close(); connectGh(); };
@@ -669,31 +742,38 @@ async function createPR() {
       confirm.textContent = "Create pull request";
       confirm.disabled = true;
       try {
-        const r = await call(window.graft.ship, { cwd: state.cwd, dryRun: true });
+        const r = await call(window.beacon.ship, { cwd: state.cwd, dryRun: true });
         annotation = r.annotation;
-        blocked = !!(r.restricted && r.restricted.length);
-        const n = r.restricted ? r.restricted.length : 0;
+        blocked = !!(r.flagged && r.flagged.length);
+        const n = r.flagged ? r.flagged.length : 0;
+        // The pre-PR review: everything Beacon flagged, each with its own
+        // revert. Whatever is kept ships flagged in the PR description.
         const warn = blocked ? zoneCallout(
-          "Some changes are outside the editable zone",
-          `${n} file${n > 1 ? "s" : ""} ${n > 1 ? "are" : "is"} outside the editable zone — a developer usually owns ${n > 1 ? "these" : "this"}: ${r.restricted.map((f) => `<code>${esc(f)}</code>`).join(" ")}.`)
-          + `<div class="callout-row"><button class="btn small danger-btn" id="revert-oz">Revert those changes</button></div>` : "";
+          "Flagged — decide before the PR",
+          `${n} change${n > 1 ? "s" : ""} ${n > 1 ? "are" : "is"} outside the front-end scope declared for this branch. Revert what shouldn't ship; anything you keep is flagged for the reviewer in the PR description.`,
+          { cls: "alert", tag: { text: "action needed", cls: "act" },
+            extra: `<ul class="files flagged">${r.flagged.map((f) => `<li><span class="dot red"></span><span class="file-name">${esc(f)}</span><button class="btn small danger-btn" data-revert-file="${esc(f)}">Revert</button></li>`).join("")}</ul>`
+              + `<div class="callout-row"><button class="btn small danger-btn" id="revert-oz">Revert all flagged</button></div>` }) : "";
         preview.innerHTML = `${warn}<div class="preview-head"><span class="badge dim">${esc(r.annotation.source)}</span></div><div class="preview-body">${renderMarkdown(r.annotation.body)}</div>`;
         confirm.className = "btn primary";
         confirm.textContent = blocked ? "Create PR & flag" : "Create pull request";
         confirm.disabled = false;
+        const revert = async (btn, files, doneMsg) => {
+          busy(btn, true, "Reverting");
+          try { const res = await call(window.beacon.revertOutOfScope, state.cwd, files); toast(res.reverted ? doneMsg(res) : "Nothing to revert"); await reloadRepoState(); await renderPreview(); }
+          catch { busy(btn, false); }
+        };
         const rz = preview.querySelector("#revert-oz");
-        if (rz) rz.addEventListener("click", async () => {
-          busy(rz, true, "Reverting");
-          try { const res = await call(window.graft.revertRestricted, state.cwd); toast(res.reverted ? `Reverted ${res.reverted} out-of-zone change${res.reverted > 1 ? "s" : ""}` : "Nothing to revert"); await reloadRepoState(); await renderPreview(); }
-          catch { busy(rz, false); }
-        });
+        if (rz) rz.addEventListener("click", () => revert(rz, undefined, (res) => `Reverted ${res.reverted} flagged change${res.reverted > 1 ? "s" : ""}`));
+        preview.querySelectorAll("button[data-revert-file]").forEach((b) =>
+          b.addEventListener("click", () => revert(b, [b.dataset.revertFile], () => `Reverted ${b.dataset.revertFile}`)));
       } catch { preview.innerHTML = `<div class="muted">Couldn't analyze the changes on this branch.</div>`; }
     };
     await renderPreview();
     onConfirm = async () => {
       busy(confirm, true, "Creating");
       try {
-        const r = await call(window.graft.ship, { cwd: state.cwd, dryRun: false, title: annotation && annotation.title, allowRestricted: blocked });
+        const r = await call(window.beacon.ship, { cwd: state.cwd, dryRun: false, title: annotation && annotation.title, allowFlagged: blocked });
         toast(`Pull request created: ${r.prUrl}`);
         close();
         await reloadRepoState();
@@ -710,7 +790,7 @@ async function selectPR(number) {
   state.selected = { type: "pr", number }; renderList(); renderTopnav();
   showDetail(`<div class="muted">Loading #${number}…</div>`);
   try {
-    const dd = await call(window.graft.prDetail, state.cwd, number, "");
+    const dd = await call(window.beacon.prDetail, state.cwd, number, "");
     const badge = dd.mergedAt ? '<span class="badge dim">merged</span>' : `<span class="badge green">open</span>`;
     const commits = (dd.commits || []).map((c) => `<div class="commit"><div class="commit-msg">${esc(c.message)}</div><div class="commit-meta">${esc(c.oid)} · ${esc(c.author)} · ${esc(ago(c.date))}</div></div>`).join("");
     const files = (dd.files || []).map((f) => `<li><span class="file-name">${esc(f.path)}</span> <span class="file-status"><span class="add">+${f.additions}</span> <span class="del">−${f.deletions}</span></span></li>`).join("");
@@ -721,40 +801,40 @@ async function selectPR(number) {
       <div class="detail-section-h">Saves (${(dd.commits || []).length})</div><div class="graph">${commits || "<span class='muted'>No commits.</span>"}</div>
       <div class="detail-section-h">Files (${(dd.files || []).length})</div><ul class="files">${files || "<li class='muted'>none</li>"}</ul>
       <div class="detail-actions"><button class="btn" data-ext="${esc(dd.url)}">${icon("external")} Open on GitHub</button></div>`);
-    d.querySelector("[data-ext]").addEventListener("click", (e) => window.graft.openExternal(e.currentTarget.dataset.ext));
+    d.querySelector("[data-ext]").addEventListener("click", (e) => window.beacon.openExternal(e.currentTarget.dataset.ext));
   } catch {}
 }
 async function selectStash(index) {
   state.selected = { type: "stash", index }; renderList(); renderTopnav();
   try {
-    const dd = await call(window.graft.stashDetail, state.cwd, index);
+    const dd = await call(window.beacon.stashDetail, state.cwd, index);
     const s = state.stashes.find((x) => x.index === index);
     const d = showDetail(`
       <h1 class="detail-title">${esc(s ? s.label : `stash@{${index}}`)}</h1>
-      <div class="detail-meta"><span class="badge dim">stash@{${index}}</span><span>set-aside changes</span></div>
+      <div class="detail-meta"><span class="badge dim">stash@{${index}}</span><span>stashed changes</span></div>
       <div class="detail-section-h">Files (${dd.files.length})</div>
       <ul class="files">${dd.files.map((f) => `<li><span class="dot mute"></span><span class="file-name">${esc(f.file)}</span><span class="file-status">${esc(f.status)}</span></li>`).join("") || "<li class='muted'>none</li>"}</ul>
       <div class="detail-actions"><button class="btn primary" id="stash-restore">Restore these changes</button><button class="btn" id="stash-rename">Rename</button></div>`);
-    d.querySelector("#stash-restore").addEventListener("click", async () => { try { await call(window.graft.stashPop, state.cwd, index); toast("Stash restored"); await reloadRepoState(); goHome(); } catch {} });
+    d.querySelector("#stash-restore").addEventListener("click", async () => { try { await call(window.beacon.stashPop, state.cwd, index); toast("Stash restored"); await reloadRepoState(); goHome(); } catch {} });
     d.querySelector("#stash-rename").addEventListener("click", async () => {
       const name = await promptName({ title: "Rename stash", ok: "Rename", initial: s ? s.label : "" });
       if (name == null) return;
-      try { await call(window.graft.stashRename, state.cwd, index, name); toast("Stash renamed"); await reloadRepoState(); selectStash(0); } catch {}
+      try { await call(window.beacon.stashRename, state.cwd, index, name); toast("Stash renamed"); await reloadRepoState(); selectStash(0); } catch {}
     });
   } catch {}
 }
 
 // --- loaders ----------------------------------------------------------------
-async function loadPRs() { const r = await call(window.graft.listPRs, state.cwd, ""); state.prsAvailable = r.available; state.prs = r.prs || []; }
-async function loadStashes() { const list = await call(window.graft.stashList, state.cwd); state.stashes = list.map((l) => { const m = l.match(/^stash@\{(\d+)\}:\s*(.*)$/); return { index: m ? Number(m[1]) : 0, label: m ? m[2] : l }; }); }
-async function loadWorking() { const w = await call(window.graft.workingChanges, state.cwd); state.working = w.files || []; }
-async function loadBranches() { const r = await call(window.graft.listBranches, state.cwd); state.branches = r.branches || []; }
-async function loadSync(fetch = false) { try { state.sync = await call(window.graft.remoteState, state.cwd, fetch); } catch { state.sync = { behind: 0, ahead: 0, upstream: null }; } }
+async function loadPRs() { const r = await call(window.beacon.listPRs, state.cwd, ""); state.prsAvailable = r.available; state.prs = r.prs || []; }
+async function loadStashes() { const list = await call(window.beacon.stashList, state.cwd); state.stashes = list.map((l) => { const m = l.match(/^stash@\{(\d+)\}:\s*(.*)$/); return { index: m ? Number(m[1]) : 0, label: m ? m[2] : l }; }); }
+async function loadWorking() { const w = await call(window.beacon.workingChanges, state.cwd); state.working = w.files || []; }
+async function loadBranches() { const r = await call(window.beacon.listBranches, state.cwd); state.branches = r.branches || []; }
+async function loadSync(fetch = false) { try { state.sync = await call(window.beacon.remoteState, state.cwd, fetch); } catch { state.sync = { behind: 0, ahead: 0, upstream: null }; } }
 
 // Reload everything derived from the repo (after any tree-changing action).
 // Recomputes ahead/behind from existing refs (no network fetch).
 async function reloadRepoState() {
-  state.ctx = await call(window.graft.context, state.cwd);
+  state.ctx = await call(window.beacon.context, state.cwd);
   await Promise.all([loadWorking().catch(() => {}), loadStashes().catch(() => {}), loadPRs().catch(() => {}), loadBranches().catch(() => {}), loadSync(false).catch(() => {})]);
   renderTopnav(); renderList();
 }
@@ -766,11 +846,40 @@ function startNewChange() { if (state.ctx && state.ctx.isRepo) goHome(); }
 async function loadContext(cwd) {
   state.cwd = cwd; state.selected = null; state.skipSync = false;
   showLoading(`Opening ${cwd.split("/").pop()}…`);
-  state.ctx = await call(window.graft.context, cwd);
+  state.ctx = await call(window.beacon.context, cwd);
   // On open, fetch once so the "pull first" gate reflects the real remote.
   await Promise.all([loadPRs().catch(() => {}), loadStashes().catch(() => {}), loadWorking().catch(() => {}), loadBranches().catch(() => {}), loadGh().catch(() => {}), loadSync(true).catch(() => {})]);
   renderTopnav(); renderGhChip(); renderList(); showEmpty();
+  // Watch the repo so the UI tracks the agent's writes as they happen.
+  window.beacon.watch(cwd).catch(() => {});
 }
+
+// --- live updates -------------------------------------------------------
+// The main process watches the open repo and pings here whenever files (or
+// guard flags, commits, branch switches) change. Refresh whatever is showing —
+// no save, no commit, no manual refresh needed. The save-message input is
+// preserved so a live update never eats what the user is typing.
+let liveTimer = null;
+window.beacon.onChanged(() => {
+  if (!state.cwd) return;
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(async () => {
+    const msgEl = $("ab-msg");
+    const keep = msgEl ? { value: msgEl.value, focused: document.activeElement === msgEl } : null;
+    try {
+      await reloadRepoState();
+      const s = state.selected;
+      if (s && (s.type === "branch" || s.type === "working")) {
+        await selectBranch(s.type === "branch" ? s.branch : state.ctx.branch, s);
+        const el = $("ab-msg");
+        if (el && keep && keep.value && !el.value) el.value = keep.value;
+        if (el && keep && keep.focused) el.focus();
+      } else if (s === null) {
+        showEmpty();
+      }
+    } catch { /* transient git state (mid-operation) — the next ping catches up */ }
+  }, 250);
+});
 
 // --- wiring -----------------------------------------------------------------
 $("repo-btn").addEventListener("click", openRepo);
@@ -786,27 +895,34 @@ $("rows").addEventListener("contextmenu", rowContextMenu);
 // Activity search: toggle a filter input in the list header.
 function toggleSearch(force) {
   state.searchOpen = force !== undefined ? force : !state.searchOpen;
-  const inp = $("list-search"), title = $("list-title");
+  const inp = $("list-search"), tabs = $("list-tabs");
   inp.classList.toggle("hidden", !state.searchOpen);
-  title.classList.toggle("hidden", state.searchOpen);
+  tabs.classList.toggle("hidden", state.searchOpen);
   if (state.searchOpen) { inp.focus(); inp.select(); }
   else if (state.query) { state.query = ""; inp.value = ""; renderList(); }
 }
+// Branches ↔ PRs tab switch.
+document.querySelectorAll(".list-tab").forEach((t) => t.addEventListener("click", () => {
+  if (state.tab === t.dataset.tab) return;
+  state.tab = t.dataset.tab;
+  document.querySelectorAll(".list-tab").forEach((x) => x.classList.toggle("active", x === t));
+  renderList();
+}));
 $("list-search-btn").addEventListener("click", () => toggleSearch());
 $("list-search").addEventListener("input", (e) => { state.query = e.target.value; renderList(); });
 $("list-search").addEventListener("keydown", (e) => { if (e.key === "Escape") toggleSearch(false); });
 $("fetch-btn").addEventListener("click", async () => {
   if (!state.cwd) return;
   const b = $("fetch-btn"); busy(b, true, "Fetching");
-  try { await call(window.graft.fetchRemote, state.cwd); toast("Fetched the latest from GitHub"); await refreshView(); }
+  try { await call(window.beacon.fetchRemote, state.cwd); toast("Fetched the latest from GitHub"); await refreshView(); }
   finally { busy(b, false); }
 });
 $("pull-btn").addEventListener("click", async () => {
   if (!state.cwd) return;
   const b = $("pull-btn"); busy(b, true, "Pulling");
-  try { const r = await call(window.graft.pull, state.cwd); toast(r.note && /already up to date/i.test(r.note) ? "Already up to date" : "Pulled the latest changes"); await refreshView(); }
+  try { const r = await call(window.beacon.pull, state.cwd); toast(r.note && /already up to date/i.test(r.note) ? "Already up to date" : "Pulled the latest changes"); await refreshView(); }
   finally { busy(b, false); }
 });
 
 // --- init -------------------------------------------------------------------
-(async () => { try { state.agents = await call(window.graft.detectAgents); } catch {} await loadGh().catch(() => {}); renderTopnav(); renderGhChip(); renderList(); showEmpty(); })();
+(async () => { try { state.agents = await call(window.beacon.detectAgents); } catch {} await loadGh().catch(() => {}); renderTopnav(); renderGhChip(); renderList(); showEmpty(); })();

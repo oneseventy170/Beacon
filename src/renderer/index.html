@@ -6,7 +6,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none';"
     />
-    <title>Devsigner</title>
+    <title>Beacon</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -39,8 +39,11 @@
            grouped In progress / In review / Done / Cancelled (Linear-style) -->
       <section class="list-col">
         <div class="list-head">
-          <span id="list-title">Activity</span>
-          <input id="list-search" class="list-search hidden" type="text" placeholder="Filter activity…" autocomplete="off" />
+          <div class="list-tabs" id="list-tabs">
+            <button class="list-tab active" data-tab="branches">Branches</button>
+            <button class="list-tab" data-tab="prs">PRs</button>
+          </div>
+          <input id="list-search" class="list-search hidden" type="text" placeholder="Filter…" autocomplete="off" />
           <div class="list-head-actions">
             <button class="icon-btn" id="list-search-btn" title="Search activity">
               <svg class="ico" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/></svg>
